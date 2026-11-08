@@ -326,7 +326,8 @@ if that window moves, so a focus change alone costs no wait.
 
     WS_DIRECTION=/path/to/ws-direction make check
 
-runs the tests that need no X server: `tests/check-tile.py` on made-up logs.
+runs the tests that need no X server: `tests/check-tile.py` and `tests/screen.py` on
+made-up logs and pictures.
 
     PICOM=/path/to/picom WS_DIRECTION=/path/to/ws-direction make check-harness
 
@@ -362,6 +363,9 @@ and keeps the marks and the frame log:
 next to it, then in `XDG_CONFIG_HOME` and `XDG_CONFIG_DIRS`), `--i3` adds a line to i3's
 config, and a scene's `exec:` action runs a command on the display, with the output
 directory in `$SCENE_OUT`.
+`tests/screen.py` checks what shows on the screen in such a scene: it puts a magenta window
+under all others, takes screenshots during a change, and finds magenta inside the tile
+rectangles and gaps that don't have their fill's colour (see its help).
 
 `tests/check-tile.py` checks what the tile style drew, from picom's frame timing log with the
 layout records (`PICOM_DEBUG="frame_timing=<path>;frame_layout=1"`): that no rectangle or

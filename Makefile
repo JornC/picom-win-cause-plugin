@@ -33,6 +33,7 @@ build/slowclient: tests/slowclient.c
 check: all
 	$(if $(WS_DIRECTION),,$(error make check needs WS_DIRECTION))
 	tests/check_tile_test.py
+	tests/screen_test.py
 
 # Runs real i3, xterm and picom on its own Xvfb. PICOM is a picom with the API above,
 # WS_DIRECTION the root of a built ws-direction tree.
