@@ -4,8 +4,9 @@ A picom plugin that tells animation scripts why a window moved, so each cause ca
 own animation. It holds what is specific to i3. picom stays neutral: it only sees trigger
 names, and scripts decide how things look. Neither i3 nor picom knows what a swirl is.
 
-Needs plugin API 0.12 of the picom fork (`rename_trigger`, `add_x_event_callback`,
-`pause_screen`, `window_animation_output`). It works with a stock i3.
+Needs plugin API 0.14 of the picom fork (`rename_trigger`, `add_x_event_callback`,
+`pause_screen`, `window_animation_output`, `window_animation_sets`,
+`wait_window_animation`). It works with a stock i3.
 
 ## Use
 
@@ -111,7 +112,7 @@ The first rule has the causes, `open` and `close`, for all windows, as a window 
 floating is floating by the time it moves. The second has the same motion for `geometry`
 (resize, swap, move, layout, floating off), but not for floating windows, so a mouse drag
 isn't slowed. It needs a picom with `window-image-width`, `fill`, `window-median-red` (or
-`window-edge-red`), `frame-on-crop`, `saved-image-own-size` and `keep-stacking`.
+`window-edge-red`), `frame-on-crop`, `saved-image-own-size`, `keep-stacking` and `wait`.
 
 - Each window of a change has a rectangle that goes from where the window was to where it
   is. All of them move on one curve, at one time, and start and end without speed. An edge
@@ -148,7 +149,11 @@ isn't slowed. It needs a picom with `window-image-width`, `fill`, `window-median
   jumps.
 - A window that opens grows out of the line it split from (see [Variables](#variables)),
   its picture standing at its place and showing as the rectangle uncovers it, while its
-  neighbours make room on the same curve. A window that closes goes
+  neighbours make room on the same curve. Its motion starts when it first has a picture
+  with content, not when i3 maps it: a program's first pictures are often transparent all
+  over (wezterm's for about 0.2 s, Chrome's for about 0.4 s), and the window would be that
+  far along when it first shows. Every style's open does this (`parts/first-picture.conf`),
+  and its neighbours wait with it, so all of them start together. A window that closes goes
   back into its line: its picture stays where it was, and its rectangle is cut where the
   windows that take its place reach, in every frame, also when windows next to it close
   with it. So no part of its place shows what lies behind. One that shares no line with its
@@ -301,9 +306,13 @@ A style that bends a window off its straight way can keep it with its neighbours
 - When a window arrives, the plugin holds picom's screen (`pause_screen`) until i3 has
   moved the others and picom has the new window's first picture, at most 0.1 s. picom then
   starts the animations of the whole change in one pass, on one clock, and the new window
-  shows from the first frame. Without it, the new window starts a pass or more after its
-  neighbours, as picom first asks the X server about it. Other causes don't hold: i3 sends
-  their moves in one go.
+  shows from the first frame; the open of one whose first picture has no content waits at
+  its start until it has (`wait` in picom). Without it, the new window starts a pass or
+  more after its neighbours, as picom first asks the X server about it. If the new
+  window's open sets `wait`, the plugin makes the animations of the windows that make room
+  for it wait as well (`wait_window_animation`), and lets go in the pass after its open no
+  longer waits: all of them go on in that pass, on one clock. Other causes don't hold: i3
+  sends their moves in one go.
 - i3 gives its frames a black background. When a program goes, the X server paints its frame
   black where the client was, before i3 drops the frame, so a close animation would show an
   empty frame. The plugin takes the background off each i3 frame it sees, so the X server
@@ -336,6 +345,8 @@ no wait.
 
 - A window that opens while its neighbours still move grows out of the line where i3 had
   them, not where they are drawn.
+- A window that opens and never draws stays at its start, and the windows that would make
+  room for it stay where they were.
 - With a picom that matches a frame whose client went by the frame alone (the fork before
   2026-11, and upstream), a rule that matches on the client (`window_type`,
   `!override_redirect`) can miss a window that closes, if picom runs a pass between the
@@ -381,7 +392,8 @@ places above a bar have no side on a seam: a dock is no tile. With a length of 1
 that comes at 0.3, 0.5 and 0.7 of the one before (floating on then off, two resizes, an open
 then a close, two opens) makes no rectangle or picture jump. A window whose first picture is
 empty (`tests/slowclient` with `argb`) has the backdrop in the colour of the last window of
-its program, and for a new program in the style's; a window at half
+its program, and for a new program in the style's, and once it drew and opens, nothing of
+what lies behind shows on the screen (`tests/screen.py`, which needs numpy); a window at half
 alpha has its backdrop at that alpha, and a translucent window's backdrop fades in and out
 as it moves. `WC_ONLY=far,stacking,dock,interrupt,backdrop` runs only those parts.
 `tests/with_ws_direction.py` runs with plain scripts and with the tile style: a change while
@@ -394,6 +406,11 @@ at rest, at full opacity, where they are, and behind it where they overlap.
 picture comes as soon as the program drew it, and reads of the screen show, inside each
 picture, the colour its program drew at the picture's size, never what lies behind nor
 another size's.
+`tests/opens.py` checks every style with two `tests/slowclient` windows whose first picture
+is empty for 0.4 s, one alone and one next to it: in every frame of each open, the
+animation's time is no more than the time since the program drew, so the first frame that
+can show the window shows the motion's start, and the open runs to its end; the window that
+makes room for the second doesn't move before it drew, and runs on its clock.
 
 `tests/scene.py` runs a list of changes on Xvfb, with i3, picom and real or test programs,
 and keeps the marks and the frame log:

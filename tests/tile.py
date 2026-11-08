@@ -15,15 +15,17 @@ dock       Two windows side by side above a bar (an i3bar dock at the bottom) tr
 interrupt  With var-length 1 s, a change that comes at about 0.3, 0.5 and 0.7 of the one
            before: floating on then off, two resizes, an open then a close, two opens.
 backdrop   A window whose first picture is still empty (tests/slowclient argb, as wezterm
-           and Chrome open) has a backdrop under its rectangle, in the median colour of the
-           last window of its class; for a class picom has no median of, the style's colour. A window drawn at half alpha gets a backdrop at that alpha. A
+           and Chrome open) has a backdrop under its rectangle, in the median colour of
+           the last window of its class, and nothing of what lies behind shows inside its
+           rectangle as it opens (tests/screen.py); for a class picom has no median of,
+           the style's colour. A window drawn at half alpha gets a backdrop at that alpha. A
            translucent window that moves gets a backdrop that fades in and out.
 
 tests/check-tile.py passes on what picom drew in each part: no rectangle or picture jumps,
 no scaled pictures, and the part's own checks.
 
 Needs PICOM, a picom with the plugin API that src/win_cause.h names, WS_DIRECTION, the root
-of a built ws-direction tree, for check-tile.py.
+of a built ws-direction tree, for check-tile.py, and numpy for tests/screen.py.
 WC_ONLY=far,stacking,... runs only those parts. Runs on its own Xvfb.
 """
 
@@ -522,12 +524,27 @@ def backdrop():
 		                     r"(\S+), alpha (\S+)", f.read())
 	known = [[float(v) for v in m[:3]] for m in medians if float(m[3]) > 0]
 	median = known[-1] if known else None
-	# One of the same class, its first picture empty for 0.4 s.
+	# One of the same class, its first picture empty for 0.4 s; screenshots as it opens
+	# once it drew.
+	out = tempfile.mkdtemp(prefix="screen-", dir=work)
+	behind = subprocess.Popen([sys.executable, f"{HERE}/screen.py", "backdrop"], env=env)
+	settle(0.3)
 	started()
 	offset = frame_log_size()
 	b = slow("bd-b", 400, "bd-same")
-	settle(0.45 + LENGTH + 0.4)
+	settle(0.45)
+	subprocess.run([sys.executable, f"{HERE}/screen.py", "shots", "b", "3", "0.06"],
+	               env=dict(env, SCENE_OUT=out), check=True)
+	settle(LENGTH + 0.4)
+	behind.terminate()
+	behind.wait()
 	started()
+	frames_from(offset, f"{out}/frames.csv")
+	result = subprocess.run([sys.executable, f"{HERE}/screen.py", "check", out],
+	                        capture_output=True, text=True).stdout
+	found = re.search(r"magenta inside rectangles: (\d+) px", result)
+	check(found and int(found[1]) == 0 and f"window {frame_ids.get('bd-b')}:" in result,
+	      f"an empty first picture: what lies behind shows inside its rectangle: {result}")
 	under = records_of(offset, "U", frame_ids.get("bd-b"))
 	check(under and median is not None and float(under[0][3]) > 0.99 and
 	      all(abs(float(v) - m) <= 1e-4 for v, m in zip(under[0][4:7], median)),

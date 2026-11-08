@@ -12,7 +12,7 @@ LDLIBS = $(shell $(PKG_CONFIG) --libs xcb)
 PLUGIN_CFLAGS = $(shell $(PKG_CONFIG) --cflags xcb-damage)
 PLUGIN_LDLIBS = -lm
 
-all: build/win-cause.so build/win-cause build/slowclient
+all: build/win-cause.so build/win-cause build/slowclient build/pauser.so
 
 build/win-cause.so: src/plugin.c src/protocol.h src/win_cause.h
 	@mkdir -p build
@@ -22,6 +22,10 @@ build/win-cause.so: src/plugin.c src/protocol.h src/win_cause.h
 build/win-cause: src/cmd.c src/protocol.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ src/cmd.c $(LDLIBS)
+
+build/pauser.so: tests/pauser.c
+	@mkdir -p build
+	$(CC) $(CFLAGS) $(LDFLAGS) -shared -fPIC -o $@ tests/pauser.c $(LDLIBS)
 
 build/slowclient: tests/slowclient.c
 	@mkdir -p build
@@ -44,6 +48,7 @@ check-harness: all
 	tests/with_ws_direction.py
 	tests/drawn.py
 	tests/covered.py
+	tests/opens.py
 
 check-all: check check-harness
 

@@ -14,7 +14,7 @@
 #include <picom/api.h>
 
 /// The plugin API the plugin needs is 0.WC_API_MINOR, as the picom fork numbers it.
-#define WC_API_MINOR 12
+#define WC_API_MINOR 14
 #define WC_STR(x) #x
 #define WC_XSTR(x) WC_STR(x)
 #define WC_API_VERSION "0." WC_XSTR(WC_API_MINOR)
@@ -84,11 +84,21 @@ struct cause {
 };
 
 /// What to name a move of a frame in this pass. Or with `from`, what to name that trigger
-/// of its change: "show" or "hide".
+/// of its change: "show" or "hide". `opened` is the frame whose arrival caused the move,
+/// if one did.
 struct rename {
 	xcb_window_t frame;
 	const char *trigger;
 	const char *from;
+	xcb_window_t opened;
+};
+
+/// A frame that makes room for the frame `opened`: its animation waits while the open of
+/// that one does, for its first picture. `started` once picom makes it wait, in the pass
+/// in which their animations start; `ran` once picom ran an animation of `opened` since.
+struct waiting {
+	xcb_window_t frame, opened;
+	bool started, ran;
 };
 
 struct name {
@@ -143,7 +153,8 @@ struct wc_state {
 	struct cause *causes;
 	struct rename *renames;
 	struct name *names;
-	size_t n_frames, n_causes, n_renames, n_names;
+	struct waiting *waiting;
+	size_t n_frames, n_causes, n_renames, n_names, n_waiting;
 	/// The split line of the last animation that asked, see wc_line_variable.
 	struct {
 		bool valid, found, far;

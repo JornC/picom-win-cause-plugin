@@ -423,6 +423,16 @@ static void wc_on_reparent(const xcb_reparent_notify_event_t *e) {
 	}
 }
 
+/// The frame whose arrival opened the cause `token`, XCB_NONE if none did.
+static xcb_window_t wc_opened_by(uint32_t token) {
+	for (size_t i = 0; token != 0 && i < wc.n_frames; i++) {
+		if (wc.frames[i].opened == token) {
+			return wc.frames[i].id;
+		}
+	}
+	return XCB_NONE;
+}
+
 static void wc_on_configure(const xcb_configure_notify_event_t *e) {
 	auto frame = e->event == wc.root ? wc_frame(e->window) : NULL;
 	if (frame == NULL) {
@@ -445,7 +455,8 @@ static void wc_on_configure(const xcb_configure_notify_event_t *e) {
 	frame->placed = true;
 	if (cause != NULL) {
 		PUSH(wc.renames, wc.n_renames,
-		     ((struct rename){frame->id, cause->trigger, NULL}));
+		     ((struct rename){frame->id, cause->trigger, NULL,
+		                      wc_opened_by(cause->token)}));
 	}
 }
 
@@ -465,7 +476,7 @@ static void wc_on_map(xcb_window_t window, bool mapped) {
 		if (cover != NULL) {
 			PUSH(wc.renames, wc.n_renames,
 			     ((struct rename){frame->id, cover->trigger,
-			                      mapped ? "show" : "hide"}));
+			                      mapped ? "show" : "hide", XCB_NONE}));
 		}
 	}
 }
@@ -993,6 +1004,76 @@ static void wc_hold(double now) {
 	}
 }
 
+/// The animation of a frame that makes room for a window that opens waits while that
+/// window's open does, for its first picture (the wait output of picom, which the style
+/// sets), so they go on together. Noted here; see wc_start_waits.
+static void wc_wait_for(xcb_window_t frame, xcb_window_t opened) {
+	if (opened == XCB_NONE || opened == frame) {
+		return;
+	}
+	for (size_t i = 0; i < wc.n_waiting; i++) {
+		if (wc.waiting[i].frame == frame && wc.waiting[i].opened == opened) {
+			return;
+		}
+	}
+	PUSH(wc.waiting, wc.n_waiting, ((struct waiting){frame, opened, false, false}));
+}
+
+/// In the pass in which picom starts the animations of a change: picom makes the
+/// animation of each frame that makes room for a window that opens wait
+/// (wait_window_animation), if that window's open sets wait. Not before: while the screen
+/// waits for the change, picom may not know the new window yet.
+static void wc_start_waits(void) {
+	size_t kept = 0;
+	for (size_t i = 0; i < wc.n_waiting; i++) {
+		auto w = wc.waiting[i];
+		if (!w.started) {
+			if (!wc.api->window_animation_sets(w.opened, "open", "wait") ||
+			    !wc.api->wait_window_animation(w.frame, true)) {
+				continue;
+			}
+			w.started = true;
+		}
+		wc.waiting[kept++] = w;
+	}
+	wc.n_waiting = kept;
+}
+
+/// Lets a frame's animation go on in the pass after the open it waits for ran and no
+/// longer waited: that window has its first picture, or has another animation. The
+/// frame's animation and the open then both go on in this pass, on one clock. The open
+/// may start passes after the one this plugin let the change start in, as another plugin
+/// may pause the screen then. Or the window is gone or hidden.
+static void wc_end_waits(void) {
+	bool keep[wc.n_waiting + 1];
+	for (size_t i = 0; i < wc.n_waiting; i++) {
+		auto w = &wc.waiting[i];
+		auto opened = wc_frame(w->opened);
+		double wait = 0;
+		bool runs = opened != NULL &&
+		            wc.api->window_animation_output(w->opened, "wait", &wait);
+		w->ran |= runs;
+		keep[i] = !w->started ||
+		          (runs ? wait > 0.5 : !w->ran && opened != NULL && opened->mapped);
+	}
+	for (size_t i = 0; i < wc.n_waiting; i++) {
+		bool still = keep[i];
+		for (size_t k = 0; k < wc.n_waiting; k++) {
+			still |= keep[k] && wc.waiting[k].frame == wc.waiting[i].frame;
+		}
+		if (!still && wc_frame(wc.waiting[i].frame) != NULL) {
+			wc.api->wait_window_animation(wc.waiting[i].frame, false);
+		}
+	}
+	size_t kept = 0;
+	for (size_t i = 0; i < wc.n_waiting; i++) {
+		if (keep[i]) {
+			wc.waiting[kept++] = wc.waiting[i];
+		}
+	}
+	wc.n_waiting = kept;
+}
+
 static const char *const wc_crop[] = {"crop-x", "crop-y", "crop-width", "crop-height"};
 
 /// A crop box in whole pixels, edge by edge.
@@ -1042,6 +1123,7 @@ static void wc_frame_callback(uint64_t frame, void *user_data) {
 	if (!runs) {
 		wc.paused = wc.api->pause_screen("plugin-win-cause", wc.hold_until - now, 0);
 	} else {
+		wc_end_waits();
 		if (wc.paused) {
 			wc.api->pause_screen("plugin-win-cause", 0, 0);
 			wc.paused = false;
@@ -1070,7 +1152,15 @@ static void wc_frame_callback(uint64_t frame, void *user_data) {
 			                       wc.renames[i].trigger);
 		}
 	}
+	for (size_t i = 0; i < wc.n_renames; i++) {
+		if (wc.renames[i].from == NULL) {
+			wc_wait_for(wc.renames[i].frame, wc.renames[i].opened);
+		}
+	}
 	wc.n_renames = 0;
+	if (runs) {
+		wc_start_waits();
+	}
 }
 
 __attribute__((constructor)) static void wc_init(void) {
