@@ -18,7 +18,14 @@
 // wezterm's and Chrome's are. It draws at an alpha of $SLOWCLIENT_ALPHA (0 to 255), or
 // opaque. The class in WM_CLASS is $SLOWCLIENT_CLASS, or slowclient.
 //
-// Usage: slowclient TITLE DELAY|A/B|never [sync|partial|argb]
+// With "child" it draws into a child window of its size, as wezterm does: only the child
+// takes Expose events, and its bit gravity keeps what it drew. It draws when the child is
+// exposed, so when it grows, not when it gets smaller.
+//
+// With $SLOWCLIENT_LOG set to a file, each frame adds a line to it as it is drawn:
+// "drew TITLE WIDTH HEIGHT TIME", TIME in CLOCK_MONOTONIC microseconds.
+//
+// Usage: slowclient TITLE DELAY|A/B|never [sync|partial|argb|child]
 
 #include <poll.h>
 #include <stdio.h>
@@ -46,7 +53,9 @@ static double now_ms(void) {
 
 int main(int argc, char **argv) {
 	if (argc < 3) {
-		fputs("usage: slowclient TITLE DELAY|A/B|never [sync|partial|argb]\n", stderr);
+		fputs("usage: slowclient TITLE DELAY|A/B|never "
+		      "[sync|partial|argb|child]\n",
+		      stderr);
 		return 2;
 	}
 	bool never = strcmp(argv[2], "never") == 0;
@@ -58,6 +67,7 @@ int main(int argc, char **argv) {
 	bool sync = argc > 3 && strcmp(argv[3], "sync") == 0;
 	bool partial = argc > 3 && strcmp(argv[3], "partial") == 0;
 	bool argb = argc > 3 && strcmp(argv[3], "argb") == 0;
+	bool child = argc > 3 && strcmp(argv[3], "child") == 0;
 
 	xcb_connection_t *c = xcb_connect(NULL, NULL);
 	if (xcb_connection_has_error(c)) {
@@ -66,7 +76,8 @@ int main(int argc, char **argv) {
 	}
 	xcb_screen_t *screen = xcb_setup_roots_iterator(xcb_get_setup(c)).data;
 	xcb_window_t w = xcb_generate_id(c);
-	const uint32_t mask = XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY;
+	const uint32_t mask =
+	    (child ? 0 : XCB_EVENT_MASK_EXPOSURE) | XCB_EVENT_MASK_STRUCTURE_NOTIFY;
 	xcb_visualid_t visual = XCB_NONE;
 	for (auto d = xcb_screen_allowed_depths_iterator(screen); argb && d.rem && !visual;
 	     xcb_depth_next(&d)) {
@@ -99,6 +110,8 @@ int main(int argc, char **argv) {
 	}
 	const char *alpha_env = getenv("SLOWCLIENT_ALPHA");
 	const uint32_t alpha = argb && alpha_env != NULL ? (uint32_t)atoi(alpha_env) & 0xff : 0xff;
+	const char *log_path = getenv("SLOWCLIENT_LOG");
+	FILE *log = log_path != NULL ? fopen(log_path, "a") : NULL;
 	const char *klass = getenv("SLOWCLIENT_CLASS");
 	char class[256];
 	int n = snprintf(class, sizeof(class), "%s%c%s", argv[1], 0,
@@ -124,6 +137,17 @@ int main(int argc, char **argv) {
 		                    XCB_ATOM_CARDINAL, 32, 1, &counter);
 	}
 
+	xcb_window_t target = w;
+	if (child) {
+		target = xcb_generate_id(c);
+		const uint32_t values[] = {XCB_BACK_PIXMAP_NONE, XCB_GRAVITY_NORTH_WEST,
+		                           XCB_EVENT_MASK_EXPOSURE};
+		xcb_create_window(
+		    c, XCB_COPY_FROM_PARENT, target, w, 0, 0, 400, 300, 0,
+		    XCB_WINDOW_CLASS_INPUT_OUTPUT, screen->root_visual,
+		    XCB_CW_BACK_PIXMAP | XCB_CW_BIT_GRAVITY | XCB_CW_EVENT_MASK, values);
+		xcb_map_window(c, target);
+	}
 	xcb_gcontext_t gc = xcb_generate_id(c);
 	xcb_create_gc(c, gc, w, 0, NULL);
 	xcb_map_window(c, w);
@@ -144,7 +168,16 @@ int main(int argc, char **argv) {
 				    (ce->width != width || ce->height != height)) {
 					width = ce->width;
 					height = ce->height;
-					dirty = true;
+					if (child) {
+						const uint32_t size[] = {width, height};
+						xcb_configure_window(
+						    c, target,
+						    XCB_CONFIG_WINDOW_WIDTH |
+						        XCB_CONFIG_WINDOW_HEIGHT,
+						    size);
+					} else {
+						dirty = true;
+					}
 				}
 				break;
 			}
@@ -185,7 +218,12 @@ int main(int argc, char **argv) {
 			uint16_t strip = partial && frame_height > 8 ? 8 : 0;
 			xcb_rectangle_t all = {0, 0, frame_width,
 			                       (uint16_t)(frame_height - strip)};
-			xcb_poly_fill_rectangle(c, w, gc, 1, &all);
+			xcb_poly_fill_rectangle(c, target, gc, 1, &all);
+			if (log != NULL) {
+				fprintf(log, "drew %s %u %u %.0f\n", argv[1], frame_width,
+				        frame_height, now_ms() * 1e3);
+				fflush(log);
+			}
 			if (sync) {
 				xcb_sync_set_counter(
 				    c, counter,

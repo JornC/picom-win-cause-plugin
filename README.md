@@ -352,6 +352,11 @@ empty (`tests/slowclient` with `argb`) has the backdrop in the colour of the las
 its program, and for a new program in the style's; a window at half
 alpha has its backdrop at that alpha, and a translucent window's backdrop fades in and out
 as it moves. `WC_ONLY=far,stacking,dock,interrupt,backdrop` runs only those parts.
+`tests/drawn.py` checks when the tile style trades a window's old picture for its newest:
+`tests/slowclient` windows get a new size and draw it at different times. The newest
+picture comes as soon as the program drew it, and reads of the screen show, inside each
+picture, the colour its program drew at the picture's size, never what lies behind nor
+another size's.
 
 `tests/scene.py` runs a list of changes on Xvfb, with i3, picom and real or test programs,
 and keeps the marks and the frame log:
