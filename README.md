@@ -98,7 +98,8 @@ isn't slowed. It needs a picom with `window-image-width`, `fill`, `window-median
 - i3's frame (the border, or the title bar), as i3 last drew it in the picture picom has,
   is drawn on the rectangle's edges in every frame: never scaled across it, as long as the
   side along it, and a title moves along with the content.
-- The content inside the frame is never scaled or blended. It is drawn at its own size, cut where it is larger than the inside of the
+- The content inside the frame is never scaled or blended (but in a window with no line,
+  see below). It is drawn at its own size, cut where it is larger than the inside of the
   frame, and the part that it doesn't cover is filled with the median colour of the
   content, the colour of more than half of it, so a rectangle looks like its window's
   background: a terminal's is dark, a white page's white, whatever their text. The fill
@@ -128,8 +129,12 @@ isn't slowed. It needs a picom with `window-image-width`, `fill`, `window-median
   windows that take its place reach, in every frame, also when windows next to it close
   with it. So no part of its place shows what lies behind. One that shares no line with its
   neighbours goes into its far side, away from them. One with no line at all (the first or
-  last on its workspace, a floating one, a new tab) keeps its own rectangle and fades in or
-  out (`var-lone-fade`).
+  last on its workspace, a floating one, a new tab) grows out of and shrinks into the
+  middle of its side toward the outside of the desk, or its own middle (`var-lone-to`). It
+  is drawn whole: its picture and its frame are scaled evenly with its rectangle, never
+  stretched. A script sees only the monitor its window is on, so the outside is the left on
+  a monitor that starts at the left edge of the screen (also the only monitor), else the
+  right.
 - A change that comes while one runs goes on from where every rectangle and picture is,
   with the speed it has. i3 restacks the windows it moves, but no window comes in front
   of a moving window that it overlaps until they are apart or the move ends: none jumps on
@@ -151,17 +156,20 @@ Save `picom.conf` once after that, so picom reads the copy.
 | `var-fill` | 1 | how much of the gap is filled: 1 all, as opaque as the window, 0 none, so what lies behind shows |
 | `@include` of the fill's colour | `parts/tile-fill-median.conf` | the colour of the fill: `tile-fill-median.conf` the median colour of the window's content, its background, `tile-fill-mean.conf` the mean colour of its content, which text moves, `tile-fill-edge.conf` the colour of the edge of its picture (the ring just inside i3's frame); an include, so picom works out only the one chosen |
 | `var-anchor-x`, `var-anchor-y` | the still point | where a picture that doesn't fit sits in its rectangle: 0 at the left (top) edge, 1 at the right (bottom), 0.5 in the middle; by default the point of the window that stays still in the change (`var-still-x`, `var-still-y`), so no edge of the picture goes back while the program catches up |
-| `var-lone-fade` | 1 | a window that opens or closes without a split line fades in or out: 1 yes, 0 no |
-| `var-far-line` | 1 | a window that shares no split line with its neighbours: 1 goes into its far side as into a line, 0 goes as one with no line (`var-lone-fade`) |
+| `var-lone-to` | 1 | a window that opens or closes without a split line grows out of and shrinks into, evenly scaled: 1 the middle of its side toward the outside of the desk, 0 its own middle |
+| `var-lone-fade` | 1 | such a window also fades in or out: 1 yes, 0 no |
+| `var-far-line` | 1 | a window that shares no split line with its neighbours: 1 goes into its far side as into a line, 0 goes as one with no line (`var-lone-to`) |
 | `var-backdrop` | 1 | how much of the backdrop under the rectangle is drawn: 1 all, 0 none, so what a picture leaves transparent shows what lies behind |
 | `var-backdrop-fade` | 0.25 | the share of `var-length` over which the backdrop fades in as a change starts (a window that opens has it at once) and out as it ends |
 | `var-backdrop-red`, `var-backdrop-green`, `var-backdrop-blue`, `var-backdrop-alpha` | 0.1, 0.1, 0.1, 1 | the backdrop's colour and alpha for a program picom knows no colour of yet; with `tile-fill-edge.conf`, for every window |
 | `var-picture` | whichever covers more | which picture of a moving window is drawn: 1 the one it had when the change started, 0 its newest, as soon as the program has drawn it; by default (`var-picture-best`), in each frame, the one that covers more of the rectangle, each at its own size from its anchor |
 
 The rest of `styles/parts/` is the motion itself: `tile-rect.conf` for a window that moves,
-`tile-open.conf` and `tile-close.conf`, with what they share in `tile-shared.conf`, and the
-three colours of the fill, `tile-fill-median.conf`, `tile-fill-mean.conf` and
-`tile-fill-edge.conf`. Nobody needs to copy them. Without `make install`, copy `styles/parts/` to
+`tile-open.conf` and `tile-close.conf`, with what they share in `tile-shared.conf` and the
+point a window with no line goes from and to in `tile-lone.conf`, the three colours of
+the fill, `tile-fill-median.conf`, `tile-fill-mean.conf` and `tile-fill-edge.conf`, and
+`tile-defaults.conf`, the value of a setting that a copy of `tile.conf` made before it came lacks. Nobody needs to
+copy them. Without `make install`, copy `styles/parts/` to
 `win-cause/parts/` next to `picom.conf`, as picom looks for included files from there, not
 next to the style.
 

@@ -15,7 +15,9 @@
 # other curve around their overlap, which passes, and straight or out of the box around
 # their places fails; two that trade places side by side lift to the left of their way by
 # var-lift, which passes, and the other way or straight fails; an undo that goes back on
-# the side it is on passes, and one that crosses its first way fails.
+# the side it is on passes, and one that crosses its first way fails. A window that opens with no line, drawn whole and evenly
+# scaled out of the middle of its left side, passes; drawn wider than high, or with its
+# frame on the rectangle, it fails.
 # Needs WS_DIRECTION, the root of a ws-direction tree, for check-frames.py.
 
 import importlib.util
@@ -352,6 +354,36 @@ def backdrop_scene(fade=True, opacity=0.6):
     return log
 
 
+def lone_scene(stretch=1.0, frame_on=False):
+    """A window with no line opens alone on the monitor: all of it grows out of the middle
+    of its left side, at var-ps of its size on the style's curve. With `stretch`, its
+    picture is drawn that much wider than high; with `frame_on`, its frame is on the
+    rectangle."""
+    log = Log()
+    hz = 175
+    t0 = 1.0
+    n = int(LENGTH * hz)
+    for i in range(0, n + 10):
+        t = t0 + i / hz
+        if i < n:
+            q = i / n
+            k = EASE(q)
+            rect = (0, 400 - 400 * k, 1000 * k, 800 * k)
+            s = {"elapsed": q * LENGTH, "duration": LENGTH, "var-on": 1, "var-line": 0,
+                 "var-anchor-x": 0, "var-anchor-y": 0.5, "var-ease": k, "var-ps": k,
+                 "var-x0": 0, "var-y0": 400, "var-w0": 0, "var-h0": 0, "var-x1": 0,
+                 "var-y1": 0, "var-w1": 1000, "var-h1": 800, "var-ax": 0, "var-ay": 400,
+                 "scale-x": k * stretch, "scale-y": k, "crop-x": rect[0],
+                 "crop-y": rect[1], "crop-width": rect[2], "crop-height": rect[3],
+                 "frame-on-crop": 1 if frame_on else 0}
+            picture = (0, rect[1], rect[2] * stretch, rect[3])
+            log.add(t, {A: {"box": (0, 0, 1000, 800), "picture": picture, "image": (1000, 800),
+                            "crop": rect, "script": s}}, [A] if i == 0 else ())
+        else:
+            log.add(t, {A: {"box": (0, 0, 1000, 800)}})
+    return log
+
+
 def swap_scene(restack=None, b_still=False):
     """A left of B, both 500 px wide, swap places on the style's curve, B on top. With
     `restack`, A is raised: halfway, while they overlap, and drawn on top at once
@@ -522,6 +554,15 @@ class TileCheckTest(unittest.TestCase):
         ok, failed, out = self.failed(scene(scaled=True))
         # A picture drawn wider for one frame also has its edge go out and back.
         self.assertEqual(failed, {"scale", "edges"}, out)
+
+    def test_lone(self):
+        ok, failed, out = self.failed(lone_scene())
+        self.assertTrue(ok, out)
+        self.assertRegex(out, r"ok  scale: [1-9]\d* pictures drawn")
+        ok, failed, out = self.failed(lone_scene(stretch=1.1))
+        self.assertIn("scale", failed, out)
+        ok, failed, out = self.failed(lone_scene(frame_on=True))
+        self.assertEqual(failed, {"frame"}, out)
 
     def test_blend(self):
         ok, failed, out = self.failed(scene(blend=True))

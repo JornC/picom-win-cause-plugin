@@ -29,7 +29,9 @@
 #   scale    the picture is drawn at its own size: in every I record of a window with a
 #            tile script, the box it is drawn in has the image's width and height, and a
 #            saved picture drawn in its place is drawn at its own size
-#            (saved-image-own-size) at the same scale
+#            (saved-image-own-size) at the same scale. A window that opens or closes with
+#            no line (var-line 0) is drawn whole, at var-ps of its size: the box is var-ps
+#            times the image's width and height, so the picture is never stretched
 #   blend    no tile script cross-fades: saved-image-blend is 0 or 1, a switch between
 #            the window's image and the saved one, and the I record draws one of them
 #   clock    the windows that start tile animations together (A records less than
@@ -64,7 +66,10 @@
 #            next frame is the one in its last
 #   frame    the window manager's frame is on the rectangle's edges in every frame of a
 #            tile script: the script sets frame-on-crop, and the I record has the frame
-#            that picom drew there (all 0 for a window without a frame)
+#            that picom drew there (all 0 for a window without a frame). A window drawn
+#            whole (var-line 0) has its frame in its picture instead, scaled with it: the
+#            script doesn't set frame-on-crop, which would scale the frame's sides only
+#            along their length
 #   box      in a tile animation of a window that moves or changes size from rest, the
 #            rectangle stays within the box around where it starts and where it ends
 #   path     in such an animation, the rectangle is where the style's way puts it
@@ -192,6 +197,12 @@ def load_check_frames(path):
 
 def tile(script):
     return script is not None and "var-on" in script and all(k in script for k in CROP)
+
+
+def whole(script):
+    """Whether a tile script draws its window whole, frame and all, at var-ps of its size:
+    one that opens or closes with no line."""
+    return script.get("var-line", 1) < 0.5
 
 
 def rect_of(script):
@@ -464,9 +475,10 @@ class TileCheck:
             if drawn is not None and drawn[0] == "both":
                 self.fail("blend", n, w, "picom blends the window's image and the saved one")
             scaled += 1
-            if abs(pw - iw) > EDGE_ROUND or abs(ph - ih) > EDGE_ROUND:
+            k = s.get("var-ps", 1) if whole(s) else 1
+            if abs(pw - k * iw) > EDGE_ROUND or abs(ph - k * ih) > EDGE_ROUND:
                 self.fail("scale", n, w, f"picture drawn {pw:g}x{ph:g} from an image of "
-                          f"{iw:g}x{ih:g}")
+                          f"{iw:g}x{ih:g}" + (f" at var-ps {k:g}" if k != 1 else ""))
             if layer.saved_size is not None:
                 if s.get("saved-image-own-size", 0) <= 0.5:
                     self.fail("scale", n, w, "the saved picture is stretched to the "
@@ -521,7 +533,10 @@ class TileCheck:
         sides = defaultdict(set)
         for n, w, layer in self.tile_layers():
             s = layer.script
-            if s.get("frame-on-crop", 0) <= 0.5:
+            if whole(s) and s.get("frame-on-crop", 0) > 0.5:
+                self.fail("frame", n, w, "a window drawn whole has its frame on the "
+                          "rectangle: frame-on-crop is " f"{s.get('frame-on-crop', 0):g}")
+            elif not whole(s) and s.get("frame-on-crop", 0) <= 0.5:
                 self.fail("frame", n, w, "the window manager's frame is not on the "
                           f"rectangle: frame-on-crop is {s.get('frame-on-crop', 0):g}")
             if layer.state != "D":
