@@ -35,7 +35,7 @@ ROOT = os.path.dirname(HERE)
 sys.dont_write_bytecode = True
 
 LENGTH = 0.5
-STYLES = ["tile", "pop", "spring", "twirl", "domino", "warp"]
+STYLES = ["tile", "fold", "pop", "spring", "twirl", "domino", "warp", "cube", "origami"]
 
 PICOM_CONFIG = """plugins = ["{plugin}"];
 vsync = true;

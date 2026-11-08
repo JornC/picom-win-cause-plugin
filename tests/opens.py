@@ -39,7 +39,7 @@ LENGTH = 0.5
 DELAY = 400
 SLACK = 0.02
 CLOCK = 0.001
-STYLES = ["tile", "pop", "spring", "twirl", "domino", "warp"]
+STYLES = ["tile", "fold", "pop", "spring", "twirl", "domino", "warp", "cube", "origami"]
 
 PICOM_CONFIG = """plugins = ["{plugin}", "{pauser}"];
 vsync = true;

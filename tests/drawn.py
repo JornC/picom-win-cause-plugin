@@ -7,13 +7,15 @@ Each style runs on its own Xvfb with i3, picom (xrender) and tests/slowclient wi
 by side: a draws each new size 150 ms after it gets it, before the hidden moment; b halfway
 between the hidden moment and the end; c at once, often before picom sees the new size; d
 into a child window, as wezterm does, and only when it is exposed, so not when it gets
-smaller, unless picom asks. A resize by i3-msg gives all a new size (the geometry trigger).
+smaller, unless picom asks. A resize by i3-msg gives all a new size (the geometry trigger),
+and for flip.conf a swap of a and b, which then differ in size (flip.conf has no c nor d).
 var-length is 1 s. Per window, from picom's frame log and the programs' own log of when
 they drew:
 
   hidden  where picom saved the old picture, each frame of the animation draws it before
-          the style's hidden moment and the window's image from then on: warp at its smallest
-          (var-q 0.5). Tile has no such moment
+          the style's hidden moment and the window's image from then on: origami and cube
+          at edge on (var-e 0.5), warp at its smallest (var-q 0.5), flip at edge on
+          (var-ease 0.5). Tile has no such moment
   waits   the first frame that draws the window's image at its new size starts after the
           program drew that size. For a, c and d, that is the first frame past the hidden
           moment; for b, at most three frames after the first one that starts after its
@@ -31,6 +33,10 @@ they drew:
           another size's colour nor any other. A read with more than 10 % of its points
           wrong fails: an empty picture is wrong all over, while xrender, where it scales a
           picture, can draw one column of it black, which is not what this checks
+  turn    cube: the line a window turns about (var-qcx + var-pu across, var-qcy + var-pv
+          down) doesn't jump against the way the window goes (var-dcx, var-dcy) at the
+          half of its turn, by more than 2 px: a box that tips over an edge comes down on
+          the far side of it
 
 Usage: drawn.py [STYLE ...], all of them by default. Needs PICOM, an i3 on PATH, numpy, and
 make all. Holds the display in WC_DISPLAY, :97 by default. Keeps what a style that fails
@@ -75,15 +81,21 @@ SIZE = (1280, 720)
 # style: (what the rule includes, the variable that passes 0.5 at the hidden moment, the
 # style's length in var-length)
 STYLES = {
+    "origami": ("@include \"win-cause/origami-geometry.conf\"", "var-e", 1.5),
+    "cube": ("@include \"win-cause/cube-geometry.conf\"", "var-e", 1.5),
     "warp": ("@include \"win-cause/warp-geometry.conf\"", "var-q", 1.0),
+    "flip": ("animations = ({\n    @include \"win-cause/flip.conf\"\n  });", "var-ease", 1.0),
     "tile": ("@include \"win-cause/tile-geometry.conf\"", None, 1.0),
 }
 # The styles that draw whichever picture covers more: the newest of a window that grows as
 # soon as the program drew it, and that of one that shrinks where its move ends.
 BEST = {"tile"}
+# The styles whose windows turn about a line (see turn).
+TURNS = {"cube"}
 
 PICOM_CONFIG = """plugins = ["{plugin}"];
 vsync = true;
+animation-triggers = ["flip"];
 rules = ({{
   match = "!override_redirect && window_type = 'normal'";
   {rule}
@@ -256,7 +268,7 @@ def check(out, style):
     failures = []
     for window, name in sorted(names.items(), key=lambda kv: kv[1]):
         starts = [t for t, w, trigger in log["A"] if w == window and t >= change and
-                  trigger in ("size", "position")]
+                  trigger in ("size", "position", "flip")]
         if not starts:
             failures.append(f"{name}: no animation started")
             continue
@@ -319,6 +331,8 @@ def check(out, style):
             if frames.index(first) - after > 3:
                 failures.append(f"{name}: its new picture shows "
                                 f"{frames.index(first) - after} frames after it drew it")
+    if style in TURNS:
+        failures += check_turn(log, names, change)
     failures += check_reads(out, log, names, style)
     return failures
 
@@ -334,6 +348,30 @@ def ended(E, anim, window):
     """The frame of `anim` in which the animation of `window` ends: the last, or the first
     whose time has run out."""
     return next((n for n in anim if E[n][window]["ended"]), anim[-1])
+
+
+def check_turn(log, names, change):
+    R, E = log["R"], log["E"]
+    frames = sorted(R)
+    failures = []
+    for window, name in sorted(names.items(), key=lambda kv: kv[1]):
+        starts = [t for t, w, trigger in log["A"] if w == window and t >= change]
+        if not starts:
+            continue
+        anim = [n for n in frames if R[n][0] >= starts[0] and "var-h2" in E[n].get(window, {})]
+        before = [n for n in anim if float(E[n][window]["var-h2"]) < 0.5]
+        after = [n for n in anim if float(E[n][window]["var-h2"]) >= 0.5]
+        if not before or not after:
+            continue
+        a, b = E[before[-1]][window], E[after[0]][window]
+        for axis, centre, pivot, way in (("across", "var-qcx", "var-pu", "var-dcx"),
+                                         ("down", "var-qcy", "var-pv", "var-dcy")):
+            go = float(a[way])
+            jump = (float(b[centre]) + float(b[pivot])) - (float(a[centre]) + float(a[pivot]))
+            if abs(go) > 1 and jump * go < 0 and abs(jump) > 2:
+                failures.append(f"{name}: the line it turns about jumps {abs(jump):.0f} px "
+                                f"against its way {axis} at the half of its turn")
+    return failures
 
 
 def check_reads(out, log, names, style):
@@ -393,13 +431,19 @@ def run_style(style, out):
     slow = round(1000 * LENGTH * factor * 0.75)
     setup = [f"exec:({sys.executable} {os.path.abspath(__file__)} capture $SCENE_OUT "
              ">/dev/null 2>&1 &)"]
-    change = 'i3:[title="^a$"] resize set width 65 ppt'
+    if style == "flip":
+        setup += ['i3:[title="^a$"] resize set width 65 ppt', 'i3:[title="^b$"] mark swapb']
+        change = (f"exec:{ROOT}/build/win-cause run flip -- "
+                  "i3-msg '[title=\"^a$\"] swap container with mark swapb' >/dev/null")
+    else:
+        change = 'i3:[title="^a$"] resize set width 65 ppt'
     os.environ["SLOWCLIENT_LOG"] = f"{out}/draws"
     open(f"{out}/draws", "w").close()
     a = argparse.Namespace(
         size=f"{SIZE[0]}x{SIZE[1]}", gaps=10, i3=[], config=f"{conf}/picom.conf",
         length=LENGTH, backend="xrender", settle=0.6, rounds=1, wait=3.0,
-        program=[f"a=slow:{FAST}", f"b=slow:{slow}", "c=slow:0", "d=slow:0:child"],
+        program=[f"a=slow:{FAST}", f"b=slow:{slow}"] +
+        (["c=slow:0", "d=slow:0:child"] if style != "flip" else []),
         name=["setup", "change"],
         scene=[",".join(setup), change])
     scene.Scene(out, a).run()

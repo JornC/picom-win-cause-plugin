@@ -207,14 +207,20 @@ next to the style.
 ## Other styles
 
 `styles/` has more styles than tile. They build on it: its settings in `parts/tile.conf`,
-and their opens that wait for the window's first picture, so they need what tile needs,
-and some need more, as below. Each style's header says how it works, what you
+and all but flip its opens that wait for the window's first picture, so they need what
+tile needs, and some need more, as below. Each style's header says how it works, what you
 can change and how to use it. Most go in the rule of `tile.conf`, in its place, with their
-`-geometry.conf` file in the rule of `tile-geometry.conf`; pop and twirl have no
+`-geometry.conf` file in the rule of `tile-geometry.conf`; fold, pop and twirl have no
 such file, and `tile-geometry.conf` stays.
 
+- **cube**: windows are the faces of boxes that turn, as ws-direction's cube. Needs the
+  corner outputs.
 - **domino**: tile, with each window of a change starting later the further right it
   starts on its monitor, so a change ripples from left to right.
+- **fold**: a window that closes folds away in 3D into its split line, and one that opens
+  unfolds out of it. Needs the corner outputs.
+- **origami**: windows are hinged panels that turn and fold as they move, open and close.
+  Needs the corner outputs.
 - **pop**: a window that opens grows out of its middle and fades in, one that closes
   shrinks into it and fades out. Goes with ws-direction's pop.
 - **spring**: tile on a damped spring: each rectangle goes a little past its place and
@@ -223,6 +229,9 @@ such file, and `tile-geometry.conf` stays.
   Needs the corner outputs.
 - **warp**: a window that moves sinks into the middle of its old place and bursts out of
   the middle of its new one.
+- **flip**: two windows that trade places turn over like cards on the way. Like swirl, it
+  is for a trigger of its own that a command starts, in a rule next to those of tile; see
+  its header. Needs the corner outputs.
 
 ## Variables
 
@@ -424,7 +433,7 @@ the overview shows, and a workspace switch and an overview that come during a ch
 closes, next to two others: in every frame of its animations the two are drawn as they are
 at rest, at full opacity, where they are, and behind it where they overlap.
 `tests/drawn.py` checks the styles that trade a window's old picture for its newest at a
-moment where it is hidden (warp): two `tests/slowclient` windows get a new size, one draws
+moment where it is hidden (origami, cube, warp and flip): two `tests/slowclient` windows get a new size, one draws
 it before that moment and one after. The newest picture comes at that moment for the first
 and as soon as it drew for the second, and reads of the screen show, inside each picture, the
 colour its program drew at the picture's size, never what lies behind nor another size's.
