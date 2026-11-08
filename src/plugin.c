@@ -323,6 +323,12 @@ static void wc_scan(void) {
 }
 
 static void wc_on_reparent(const xcb_reparent_notify_event_t *e) {
+	// A frame that shows already when it gets its client gets no MapNotify, and maybe
+	// no ConfigureNotify, for it: it is read as one that was there when we came. When
+	// i3 restores its layout after a restart, it puts each window in the frame of its
+	// placeholder.
+	auto known = wc_frame(e->parent);
+	bool shows = known != NULL && known->mapped;
 	auto frame = wc_frame_of_client(e->window);
 	if (frame != NULL) {
 		// i3 gave the client a new frame.
@@ -333,13 +339,20 @@ static void wc_on_reparent(const xcb_reparent_notify_event_t *e) {
 			frame->id = e->parent;
 			frame->placed = frame->mapped = false;
 			wc_keep_picture(frame->id);
+			if (shows) {
+				wc_read_frame(frame);
+			}
 		}
 		return;
 	}
 	if (e->event == wc.root && e->parent != wc.root) {
 		wc_keep_picture(e->parent);
 		auto token = wc_open_cause("moved-by-open", XCB_NONE, e->parent);
-		wc_add_frame(e->parent, e->window)->opened = token;
+		frame = wc_add_frame(e->parent, e->window);
+		frame->opened = token;
+		if (shows) {
+			wc_read_frame(frame);
+		}
 		if (token != 0) {
 			PUSH(wc.awaited, wc.n_awaited,
 			     ((struct awaited){e->parent, token, false}));

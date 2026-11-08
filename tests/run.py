@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Checks which trigger each real i3 action starts, from picom's own log, and from picom's
 frame timing log that the windows of one change start in one frame, and the split line the
-plugin gives the scripts of a window that opens or closes. And from the screen, that a window
-that closes shows its last picture, not i3's empty frame.
+plugin gives the scripts of a window that opens or closes, also after i3 restarts. And from
+the screen, that a window that closes shows its last picture, not i3's empty frame.
 
 Needs PICOM, a picom with the plugin API that src/win_cause.h names. Runs on its own Xvfb.
 """
@@ -385,14 +385,21 @@ try:
 		c.terminate()
 		c.wait()
 		check("close after a reload", {"a": {"moved-by-close"}} if attempt else {})
+	# i3 puts each window in a frame that shows already when it restarts: the plugin reads
+	# it from X, so the windows that make room still give the split line.
 	i3("restart")
 	time.sleep(2)
 	starts()
+	old = tree_windows("rect")
 	c = open_window("c")
 	check("open after a restart", {"a": {"moved-by-open"}, "b": {"moved-by-open"}})
+	new = tree_windows("rect")
+	check_line("open after a restart: line", "c", new["c"], [old["a"], old["b"]])
 	c.terminate()
 	c.wait()
 	check("close after a restart", {"a": {"moved-by-close"}, "b": {"moved-by-close"}})
+	after = tree_windows("rect")
+	check_line("close after a restart: line", "c", new["c"], [after["a"], after["b"]])
 
 	# A window that closes shows its last picture: when its program goes, the X server
 	# paints i3's frame black where the client was, before i3 drops the frame, unless the

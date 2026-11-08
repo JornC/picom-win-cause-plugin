@@ -210,7 +210,7 @@ runs the tests, on X. They run the `i3` and `i3-msg` first on `PATH`.
 
 Runs real i3, xterm and picom on its own Xvfb, and checks in picom's log which trigger each
 action started, and in its frame timing log that the windows of a change start in one frame
-and the split line of each window that opens or closes; and on the
+and the split line of each window that opens or closes, also after i3 restarts; and on the
 screen, that a window whose program closes shows its last picture while it closes, not an
 empty frame. `WC_BACKEND=glx` and `WC_ROUNDS=n` change how.
 
