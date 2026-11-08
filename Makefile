@@ -43,6 +43,7 @@ check-harness: all
 	tests/tile.py
 	tests/with_ws_direction.py
 	tests/drawn.py
+	tests/covered.py
 
 check-all: check check-harness
 

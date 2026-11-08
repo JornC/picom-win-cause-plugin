@@ -69,18 +69,26 @@ struct frame {
 	xcb_get_property_cookie_t type;
 };
 
+/// Why windows move: a trigger to rename their moves to. Or why windows hide or show,
+/// and nothing about their moves: a fullscreen window covers them, and i3 hides them, or
+/// uncovers them, and i3 shows them again.
+enum cause_kind { CAUSE_TRIGGER, CAUSE_COVER, CAUSE_UNCOVER };
+
 /// Applies to the frame `only`, or if that is 0, to every frame but `except`. A cause of
 /// the command has the command's window as its token, so it ends with that window.
 struct cause {
 	uint32_t token;
+	enum cause_kind kind;
 	const char *trigger;
 	xcb_window_t only, except;
 };
 
-/// What to name a move of a frame in this pass.
+/// What to name a move of a frame in this pass. Or with `from`, what to name that trigger
+/// of its change: "show" or "hide".
 struct rename {
 	xcb_window_t frame;
 	const char *trigger;
+	const char *from;
 };
 
 struct name {

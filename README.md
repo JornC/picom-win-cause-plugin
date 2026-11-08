@@ -23,9 +23,14 @@ optional. The name says it: the window moved because of that.
 | `moved-by-close` | windows that moved because a window went away |
 | `moved-by-fullscreen` | the window that went in or out of fullscreen |
 | `moved-by-float` | the window that became floating, and the windows that take its place |
+| `covered-by-fullscreen` | the windows that i3 hides because a window goes fullscreen over them |
+| `uncovered-by-fullscreen` | the windows that i3 shows again because the window that covered them leaves fullscreen or closes |
 
-The window that opens or closes keeps `open` or `close`. These are in rules of their own,
-so they sit next to any other style, such as those of ws-direction:
+The last two name a hide and a show, not a move: a window with no script for them starts
+`hide` or `show`, which a workspace switch style animates, such as ws-direction's fade
+outside a switch (see [Fullscreen](#fullscreen)). The window that opens or closes keeps
+`open` or `close`. These are in rules of their own, so they sit next to any other style,
+such as those of ws-direction:
 
     plugins = ["ws-direction.so", "win-cause.so"];
     animation-triggers = ["swirl"];
@@ -68,6 +73,25 @@ takes, even if it moves nothing or gets killed.
 
 A style holds a move back by either name. `suppressions = ["geometry"]` holds back all moves,
 and `suppressions = ["moved-by-close"]` only those.
+
+## Fullscreen
+
+i3 hides the other windows of a workspace while one is fullscreen, and shows them again
+when it leaves fullscreen or closes. Those windows go nowhere: they are covered. Every style
+moves the window that goes fullscreen, or back, as it moves any window (its
+`moved-by-fullscreen` animation), and has the same rule for the windows it covers and
+uncovers, `styles/parts/cover.conf`:
+
+- Going fullscreen, they stay as they are, where they are, at their opacity, while the
+  window grows over them, and are gone once its move ends and covers them.
+- Leaving fullscreen, or closing, they are there at once, as they are, where they are,
+  under the window as it moves back to its place or closes.
+
+The window stays in front of them all the while, whatever order i3 stacks them in: they
+are farther from the viewer (`depth` 1 in `cover.conf`, 0 in the window's
+`moved-by-fullscreen` and `close` animations). Each style sets `var-cover-time` in that
+rule, how long its moves and closes take at most, so they last as long as the window's
+animation.
 
 ## Style: tile
 
@@ -287,9 +311,11 @@ A style that bends a window off its straight way can keep it with its neighbours
 - A window that moves while a cause is open gets that change renamed
   (`rename_trigger` from `geometry`). A rename starts nothing by itself: picom still decides whether
   the window moved, and whether that is held back. A window that opens, closes, shows or hides
-  keeps that trigger. And an animation that another plugin starts wins over a rename, in
-  either load order, so this plugin sits next to ws-direction: a workspace switch it
-  starts stays as it is.
+  keeps that trigger, but for a window that a fullscreen window covers or uncovers: while a
+  cause of `moved-by-fullscreen` is open, or of `moved-by-close` for a window that was
+  fullscreen, the hide or show of each other window is renamed (`rename_trigger`). And an
+  animation that another plugin starts wins over a rename, in either load order, so this
+  plugin sits next to ws-direction: a workspace switch it starts stays as it is.
 
 What opens each cause, in the order i3 does things:
 
@@ -298,10 +324,13 @@ What opens each cause, in the order i3 does things:
 | `moved-by-open` | the client is reparented into its frame | i3 maps it and moves the others |
 | `moved-by-close` | the client is unmapped or destroyed | i3 moves the others, then drops the frame |
 | `moved-by-fullscreen` | `_NET_WM_STATE` gains or loses fullscreen | i3 moves the window |
+| `covered-by-fullscreen`, `uncovered-by-fullscreen` | the same, or the client of a fullscreen window goes (uncovered) | i3 hides or shows the other windows of its workspace |
 | `moved-by-float` | `I3_FLOATING_WINDOW` appears | i3 moves the window |
 
 The plugin asks the X server for `_NET_WM_STATE` without waiting. It only waits for the answer
-if that window moves, so a focus change alone costs no wait.
+if that window moves, or a window shows or hides while it is on its way (i3 tells a window
+it goes fullscreen before it hides what the window covers), so a focus change alone costs
+no wait.
 
 ## Limits
 
@@ -317,6 +346,8 @@ if that window moves, so a focus change alone costs no wait.
 - Resize, swap, move and layout changes show nothing beforehand. They keep `geometry`, unless
   `win-cause run` names them. Mouse drags have no command, so they keep `geometry` too.
 - Two moves of a window inside one picom pass are one change, with one trigger.
+- A fullscreen window that moves to another workspace shows what it covered with no cause:
+  those windows start `show`.
 - The first cause after picom reloads is lost, because the plugin learns of picom's new window
   a pass later. That window gets its own trigger.
 - Needs i3: other window managers don't answer `I3_SYNC`. Without i3 the plugin says so when
@@ -355,6 +386,9 @@ alpha has its backdrop at that alpha, and a translucent window's backdrop fades 
 as it moves. `WC_ONLY=far,stacking,dock,interrupt,backdrop` runs only those parts.
 `tests/with_ws_direction.py` runs with plain scripts and with the tile style: a change while
 the overview shows, and a workspace switch and an overview that come during a change.
+`tests/covered.py` checks every style with a window that goes fullscreen and back, and
+closes, next to two others: in every frame of its animations the two are drawn as they are
+at rest, at full opacity, where they are, and behind it where they overlap.
 `tests/drawn.py` checks when the tile style trades a window's old picture for its newest:
 `tests/slowclient` windows get a new size and draw it at different times. The newest
 picture comes as soon as the program drew it, and reads of the screen show, inside each

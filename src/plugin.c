@@ -187,13 +187,14 @@ static void wc_take_compositor(void) {
 }
 
 /// Returns the cause's token, 0 if none opened.
-static uint32_t wc_open_cause(const char *trigger, xcb_window_t only, xcb_window_t except) {
+static uint32_t wc_open_cause_as(enum cause_kind kind, const char *trigger,
+                                 xcb_window_t only, xcb_window_t except) {
 	if (!wc.i3 || wc.compositor == XCB_NONE) {
 		return 0;
 	}
 	wc_ask_compositor();
 	uint32_t token = WC_TOKEN_PLUGIN | wc.next_token++;
-	PUSH(wc.causes, wc.n_causes, ((struct cause){token, trigger, only, except}));
+	PUSH(wc.causes, wc.n_causes, ((struct cause){token, kind, trigger, only, except}));
 	xcb_client_message_event_t sync = {
 	    .response_type = XCB_CLIENT_MESSAGE,
 	    .format = 32,
@@ -207,6 +208,10 @@ static uint32_t wc_open_cause(const char *trigger, xcb_window_t only, xcb_window
 	return token;
 }
 
+static uint32_t wc_open_cause(const char *trigger, xcb_window_t only, xcb_window_t except) {
+	return wc_open_cause_as(CAUSE_TRIGGER, trigger, only, except);
+}
+
 static bool wc_cause_open(uint32_t token) {
 	for (size_t i = 0; i < wc.n_causes; i++) {
 		if (wc.causes[i].token == token) {
@@ -216,16 +221,45 @@ static bool wc_cause_open(uint32_t token) {
 	return false;
 }
 
+static bool wc_names_moves(const struct cause *cause) {
+	return cause->kind == CAUSE_TRIGGER;
+}
+
 /// The cause of a frame's move: the newest wins.
 static const struct cause *wc_cause_for(xcb_window_t frame) {
 	for (size_t i = wc.n_causes; i > 0; i--) {
 		auto cause = &wc.causes[i - 1];
-		if (cause->only == frame ||
-		    (cause->only == XCB_NONE && cause->except != frame)) {
+		if (wc_names_moves(cause) &&
+		    (cause->only == frame ||
+		     (cause->only == XCB_NONE && cause->except != frame))) {
 			return cause;
 		}
 	}
 	return NULL;
+}
+
+/// The cause of a frame's hide, or with `shows`, of its show, NULL if none.
+static const struct cause *wc_cover_for(xcb_window_t frame, bool shows) {
+	enum cause_kind kind = shows ? CAUSE_UNCOVER : CAUSE_COVER;
+	for (size_t i = wc.n_causes; i > 0; i--) {
+		auto cause = &wc.causes[i - 1];
+		if (cause->kind == kind && cause->except != frame) {
+			return cause;
+		}
+	}
+	return NULL;
+}
+
+/// i3 hides the other windows of a workspace while one is fullscreen, and shows them
+/// again when it is no longer: they are covered, or uncovered (`covers` false), by the
+/// frame `fullscreen`, with the cause of the change that made it so.
+static void wc_cover(uint32_t token, bool covers, xcb_window_t fullscreen) {
+	if (token != 0) {
+		PUSH(wc.causes, wc.n_causes,
+		     ((struct cause){token, covers ? CAUSE_COVER : CAUSE_UNCOVER,
+		                     covers ? "covered-by-fullscreen" : "uncovered-by-fullscreen",
+		                     XCB_NONE, fullscreen}));
+	}
 }
 
 static bool wc_has_atom(xcb_get_property_reply_t *reply, xcb_atom_t atom) {
@@ -277,7 +311,8 @@ static void wc_take_state(struct frame *frame, bool wait) {
 	free(reply);
 	if (fullscreen != frame->fullscreen) {
 		frame->fullscreen = fullscreen;
-		wc_open_cause("moved-by-fullscreen", frame->id, XCB_NONE);
+		auto token = wc_open_cause("moved-by-fullscreen", frame->id, XCB_NONE);
+		wc_cover(token, fullscreen, frame->id);
 	}
 }
 
@@ -409,14 +444,29 @@ static void wc_on_configure(const xcb_configure_notify_event_t *e) {
 	frame->rect = rect;
 	frame->placed = true;
 	if (cause != NULL) {
-		PUSH(wc.renames, wc.n_renames, ((struct rename){frame->id, cause->trigger}));
+		PUSH(wc.renames, wc.n_renames,
+		     ((struct rename){frame->id, cause->trigger, NULL}));
 	}
 }
 
 static void wc_on_map(xcb_window_t window, bool mapped) {
 	auto frame = wc_frame(window);
 	if (frame != NULL) {
+		// i3 tells a window it goes in or out of fullscreen before it hides or
+		// shows what the window covers, which it may do before it moves the
+		// window: the change's cause is open by now, if one is coming.
+		for (size_t i = 0; i < wc.n_frames; i++) {
+			if (wc.frames[i].reading) {
+				wc_take_state(&wc.frames[i], true);
+			}
+		}
 		frame->mapped = mapped;
+		auto cover = frame->closed == 0 ? wc_cover_for(frame->id, mapped) : NULL;
+		if (cover != NULL) {
+			PUSH(wc.renames, wc.n_renames,
+			     ((struct rename){frame->id, cover->trigger,
+			                      mapped ? "show" : "hide"}));
+		}
 	}
 }
 
@@ -431,7 +481,12 @@ static void wc_on_client_gone(xcb_window_t client) {
 		}
 		frame->closed = ++wc.closes;
 		wc_trim_closed();
-		frame->closing = wc_open_cause("moved-by-close", XCB_NONE, id);
+		auto token = wc_open_cause("moved-by-close", XCB_NONE, id);
+		if (frame->fullscreen) {
+			// i3 shows what it covered.
+			wc_cover(token, false, id);
+		}
+		frame->closing = token;
 	}
 }
 
@@ -469,7 +524,8 @@ static void wc_on_message(const xcb_client_message_event_t *e) {
 		if (trigger != NULL && (frame != NULL || window == XCB_NONE)) {
 			auto only = frame != NULL ? frame->id : XCB_NONE;
 			PUSH(wc.causes, wc.n_causes,
-			     ((struct cause){e->data.data32[1], trigger, only, XCB_NONE}));
+			     ((struct cause){e->data.data32[1], CAUSE_TRIGGER, trigger,
+			                     only, XCB_NONE}));
 		}
 	}
 }
@@ -1001,7 +1057,18 @@ static void wc_frame_callback(uint64_t frame, void *user_data) {
 		}
 	}
 	for (size_t i = 0; i < wc.n_renames; i++) {
-		wc.api->rename_trigger(wc.renames[i].frame, "geometry", wc.renames[i].trigger);
+		if (wc.renames[i].from == NULL) {
+			wc.api->rename_trigger(wc.renames[i].frame, "geometry",
+			                       wc.renames[i].trigger);
+		}
+	}
+	// After the moves: picom takes a show or a hide over a move, and the last rename
+	// of a window wins.
+	for (size_t i = 0; i < wc.n_renames; i++) {
+		if (wc.renames[i].from != NULL) {
+			wc.api->rename_trigger(wc.renames[i].frame, wc.renames[i].from,
+			                       wc.renames[i].trigger);
+		}
 	}
 	wc.n_renames = 0;
 }
@@ -1048,8 +1115,9 @@ __attribute__((constructor)) static void wc_init(void) {
 	}
 	free(damage);
 	wc_scan();
-	static const char *const triggers[] = {"moved-by-open", "moved-by-close",
-	                                       "moved-by-fullscreen", "moved-by-float"};
+	static const char *const triggers[] = {
+	    "moved-by-open",  "moved-by-close",        "moved-by-fullscreen",
+	    "moved-by-float", "covered-by-fullscreen", "uncovered-by-fullscreen"};
 	for (size_t i = 0; i < sizeof(triggers) / sizeof(triggers[0]); i++) {
 		wc.api->add_animation_trigger(triggers[i]);
 	}

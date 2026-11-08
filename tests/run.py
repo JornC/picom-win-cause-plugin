@@ -276,9 +276,11 @@ try:
 		      together="abc")
 		check_line("close by the app: line", "c", new["c"], [after["a"], after["b"]])
 		i3("[title=^a$] fullscreen enable")
-		check("fullscreen on", {"a": {"moved-by-fullscreen"}, "b": {"hide"}}, together="ab")
+		check("fullscreen on", {"a": {"moved-by-fullscreen"}, "b": {"covered-by-fullscreen"}},
+		      together="ab")
 		i3("[title=^a$] fullscreen disable")
-		check("fullscreen off", {"a": {"moved-by-fullscreen"}, "b": {"show"}}, together="ab")
+		check("fullscreen off", {"a": {"moved-by-fullscreen"}, "b": {"uncovered-by-fullscreen"}},
+		      together="ab")
 		i3("[title=^a$] floating enable")
 		check("floating on", {"a": {"moved-by-float"}, "b": {"moved-by-float"}},
 		      together="ab")
@@ -286,7 +288,8 @@ try:
 		check("floating off: the signal comes after the move", {"a": OWN, "b": OWN})
 		i3("[title=^a$] focus")
 
-		# A window that opens or hides keeps that trigger, whatever moved it.
+		# A window that opens or hides keeps that trigger, whatever moved it, but for one
+		# that a fullscreen window covers.
 		d = open_window("floats")
 		check("new window that floats", {"floats": {"open"}}, quiet=["a", "b"])
 		check_line("new window that floats: no line", "floats", None, None)
@@ -295,11 +298,12 @@ try:
 		settle()
 		starts()
 		d = open_window("bigone")
-		check("new window that goes fullscreen", {"bigone": {"open"}, "a": {"hide"}, "b": {"hide"}})
+		check("new window that goes fullscreen", {"bigone": {"open"},
+		      "a": {"covered-by-fullscreen"}, "b": {"covered-by-fullscreen"}})
 		d.terminate()
 		d.wait()
-		settle()
-		starts()
+		check("fullscreen window that closes", {"a": {"uncovered-by-fullscreen"},
+		      "b": {"uncovered-by-fullscreen"}})
 		d = open_window("jumps")
 		# The first time picom sees it mapped, it opens.
 		check("new window with a switch",
