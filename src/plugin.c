@@ -34,6 +34,10 @@
 
 struct wc_state wc;
 
+/// The widest gap between two windows that lie side by side along a line, in pixels:
+/// wider than the gaps i3 leaves between tiles, narrower than a window.
+#define WC_SEAM_GAP 64
+
 static void wc_fail(const char *message) {
 	fprintf(stderr, "win-cause: %s\n", message);
 }
@@ -86,6 +90,9 @@ static void wc_drop_frame(size_t i) {
 	if (wc.frames[i].reading) {
 		xcb_discard_reply(wc.c, wc.frames[i].state.sequence);
 	}
+	if (wc.frames[i].typing) {
+		xcb_discard_reply(wc.c, wc.frames[i].type.sequence);
+	}
 	wc.frames[i] = wc.frames[--wc.n_frames];
 }
 
@@ -114,7 +121,13 @@ static void wc_keep_picture(xcb_window_t frame) {
 static struct frame *wc_add_frame(xcb_window_t id, xcb_window_t client) {
 	wc_forget(id);
 	PUSH(wc.frames, wc.n_frames, ((struct frame){.id = id, .client = client}));
-	return &wc.frames[wc.n_frames - 1];
+	auto frame = &wc.frames[wc.n_frames - 1];
+	// A client says it is a dock before i3 takes it.
+	frame->type =
+	    xcb_get_property(wc.c, 0, client, wc.a_window_type, XCB_ATOM_ATOM, 0, 32);
+	frame->typing = true;
+	xcb_flush(wc.c);
+	return frame;
 }
 
 /// Keeps the last WC_CLOSED_KEPT frames whose client went.
@@ -226,6 +239,20 @@ static bool wc_has_atom(xcb_get_property_reply_t *reply, xcb_atom_t atom) {
 	return has;
 }
 
+/// Whether a frame's client is a dock, as i3 tells: its _NET_WM_WINDOW_TYPE has
+/// _NET_WM_WINDOW_TYPE_DOCK.
+static bool wc_dock(struct frame *frame) {
+	if (frame->typing) {
+		xcb_generic_error_t *error = NULL;
+		auto reply = xcb_get_property_reply(wc.c, frame->type, &error);
+		frame->dock = wc_has_atom(reply, wc.a_dock);
+		frame->typing = false;
+		free(reply);
+		free(error);
+	}
+	return frame->dock;
+}
+
 static void wc_read_state(struct frame *frame) {
 	if (frame->reading) {
 		xcb_discard_reply(wc.c, frame->state.sequence);
@@ -290,7 +317,7 @@ static void wc_read_frame(struct frame *frame) {
 	if (geometry != NULL) {
 		frame->rect = wc_rect(geometry->x, geometry->y, geometry->width,
 		                      geometry->height, geometry->border_width);
-		frame->before = frame->shown = frame->drawn = frame->rect;
+		frame->before = frame->shown = frame->drawn = frame->was = frame->rect;
 		frame->placed = true;
 	}
 	frame->mapped = attributes != NULL && attributes->map_state != XCB_MAP_STATE_UNMAPPED;
@@ -373,7 +400,7 @@ static void wc_on_configure(const xcb_configure_notify_event_t *e) {
 	auto cause = wc_cause_for(frame->id);
 	uint32_t token = cause != NULL ? cause->token : 0;
 	if (!frame->placed) {
-		frame->shown = frame->drawn = rect;
+		frame->shown = frame->drawn = frame->was = rect;
 	}
 	if (!frame->placed || frame->cause != token) {
 		frame->before = frame->placed ? frame->rect : rect;
@@ -794,6 +821,85 @@ static double wc_line_variable(const struct picom_animation_start *start, void *
 	}
 }
 
+/// The gap from side `side` of `a` to the facing side of `b` along `axis` (0 x, 1 y; side
+/// 0 is the left or top), negative where they overlap, and whether they touch across it.
+static bool wc_facing(struct rect a, struct rect b, int axis, int side, int64_t *gap) {
+	int64_t alo = wc_lo(a, axis), ahi = wc_hi(a, axis);
+	int64_t blo = wc_lo(b, axis), bhi = wc_hi(b, axis);
+	*gap = side == 0 ? alo - bhi : blo - ahi;
+	return wc_common(a, b, 1 - axis) > 0;
+}
+
+/// Which sides of window `f` lie on a seam in the change that starts, as left, top,
+/// right, bottom: a tiled neighbour faces the side across the same gap, at most
+/// WC_SEAM_GAP wide, where both start (where the screen showed them last) and where both
+/// end (where i3 put them), so the two go on together. A dock, such as a bar along the
+/// workspace, is no tile.
+static void wc_seams(const struct frame *f, bool seam[4]) {
+	seam[0] = seam[1] = seam[2] = seam[3] = false;
+	if (f->floating) {
+		return;
+	}
+	for (size_t i = 0; i < wc.n_frames; i++) {
+		auto n = &wc.frames[i];
+		if (n == f || !n->placed || !n->mapped || n->floating || n->closed != 0 ||
+		    wc_dock(n)) {
+			continue;
+		}
+		for (int k = 0; k < 4; k++) {
+			int axis = k % 2, side = k / 2;
+			int64_t gap0, gap1;
+			seam[k] =
+			    seam[k] ||
+			    (wc_facing(f->drawn, n->drawn, axis, side, &gap0) &&
+			     wc_facing(f->rect, n->rect, axis, side, &gap1) && gap0 >= -1 &&
+			     gap0 <= WC_SEAM_GAP && gap1 - gap0 <= 1 && gap0 - gap1 <= 1);
+		}
+	}
+}
+
+enum { WC_SX, WC_SY, WC_SW, WC_SH, WC_SEAM_LEFT, WC_N_PLACE = WC_SEAM_LEFT + 4 };
+
+/// The variables plugin-win-cause-sx, -sy, -sw and -sh: where the window was before its
+/// last move, minus where it is. A script adds them to window-x and the others to get
+/// where its rectangle starts. And -seam-left, -seam-top, -seam-right, -seam-bottom: 1
+/// where that side of the window lies on a seam with a neighbour where the change starts
+/// and where it ends (wc_seams). All 0 for a window i3 doesn't manage. picom asks for
+/// each variable on its own: they are worked out once per window and pass, the seams
+/// only once a script reads one.
+static double wc_place_variable(const struct picom_animation_start *start, void *user_data) {
+	static struct {
+		bool valid, seams_known;
+		uint64_t pass;
+		uint32_t window;
+		double values[WC_N_PLACE];
+	} last;
+	auto f = wc_frame(start->window);
+	if (!last.valid || last.pass != start->frame || last.window != start->window) {
+		last.valid = true;
+		last.pass = start->frame;
+		last.window = start->window;
+		last.seams_known = f == NULL;
+		memset(last.values, 0, sizeof(last.values));
+		if (f != NULL) {
+			last.values[WC_SX] = f->was.x - f->rect.x;
+			last.values[WC_SY] = f->was.y - f->rect.y;
+			last.values[WC_SW] = f->was.width - f->rect.width;
+			last.values[WC_SH] = f->was.height - f->rect.height;
+		}
+	}
+	auto i = (intptr_t)user_data;
+	if (i >= WC_SEAM_LEFT && !last.seams_known && f != NULL) {
+		bool seams[4];
+		wc_seams(f, seams);
+		for (int k = 0; k < 4; k++) {
+			last.values[WC_SEAM_LEFT + k] = seams[k] ? 1 : 0;
+		}
+		last.seams_known = true;
+	}
+	return last.values[i];
+}
+
 static bool wc_awaiting(void) {
 	for (size_t i = 0; i < wc.n_awaited; i++) {
 		if (!wc.awaited[i].drawn || wc_cause_open(wc.awaited[i].token)) {
@@ -889,6 +995,7 @@ static void wc_frame_callback(uint64_t frame, void *user_data) {
 		for (size_t i = 0; i < wc.n_frames; i++) {
 			auto f = &wc.frames[i];
 			if (memcmp(&f->shown, &f->rect, sizeof(f->rect)) != 0) {
+				f->was = f->shown;
 				f->shown = f->rect;
 			}
 		}
@@ -928,6 +1035,8 @@ __attribute__((constructor)) static void wc_init(void) {
 	wc.a_state = wc_atom("_NET_WM_STATE");
 	wc.a_fullscreen = wc_atom("_NET_WM_STATE_FULLSCREEN");
 	wc.a_floating = wc_atom("I3_FLOATING_WINDOW");
+	wc.a_window_type = wc_atom("_NET_WM_WINDOW_TYPE");
+	wc.a_dock = wc_atom("_NET_WM_WINDOW_TYPE_DOCK");
 	wc.i3 = wc_i3_runs();
 	if (!wc.i3) {
 		wc_fail("i3 is not running, so no window gets a cause");
@@ -950,6 +1059,13 @@ __attribute__((constructor)) static void wc_init(void) {
 	for (intptr_t i = 0; i < (intptr_t)(sizeof(line) / sizeof(line[0])); i++) {
 		wc.api->add_animation_variable("plugin-win-cause", line[i],
 		                               wc_line_variable, (void *)i);
+	}
+	static const char *const place[] = {
+	    "sx", "sy", "sw", "sh", "seam-left", "seam-top", "seam-right", "seam-bottom"};
+	static_assert(sizeof(place) / sizeof(place[0]) == WC_N_PLACE);
+	for (intptr_t i = 0; i < WC_N_PLACE; i++) {
+		wc.api->add_animation_variable("plugin-win-cause", place[i],
+		                               wc_place_variable, (void *)i);
 	}
 	wc.api->add_x_event_callback(wc_x_event, NULL);
 	wc.api->add_frame_callback(wc_frame_callback, NULL);

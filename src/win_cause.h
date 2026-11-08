@@ -55,13 +55,18 @@ struct frame {
 	uint32_t opened, closing;
 	/// Where the frame was in the last pass that picom ran its animations in: where
 	/// the screen last showed it, unless an animation draws it elsewhere. And where
-	/// the screen last showed it, its animation's rectangle if one runs.
-	struct rect shown, drawn;
+	/// the screen last showed it, its animation's rectangle if one runs. Where it was
+	/// before its last move (`was`).
+	struct rect shown, drawn, was;
 	/// When the client went, counting closes from 1; 0 while it is there.
 	uint64_t closed;
 	/// A read of _NET_WM_STATE is on its way, in `state`.
 	bool reading;
 	xcb_get_property_cookie_t state;
+	/// Whether its client is a dock, such as a bar, which i3 doesn't tile (wc_dock).
+	/// A read of _NET_WM_WINDOW_TYPE is on its way in `type` while `typing`.
+	bool dock, typing;
+	xcb_get_property_cookie_t type;
 };
 
 /// Applies to the frame `only`, or if that is 0, to every frame but `except`. A cause of
@@ -104,7 +109,8 @@ struct wc_state {
 	const struct picom_api *api;
 	xcb_connection_t *c;
 	xcb_window_t root;
-	xcb_atom_t a_arm, a_sync, a_compositor, a_i3_socket, a_state, a_fullscreen, a_floating;
+	xcb_atom_t a_arm, a_sync, a_compositor, a_i3_socket, a_state, a_fullscreen,
+	    a_floating, a_window_type, a_dock;
 	/// The last owner of the compositor selection we know of, which i3's answers go
 	/// to.
 	xcb_window_t compositor;

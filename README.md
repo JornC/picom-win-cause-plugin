@@ -140,6 +140,20 @@ side. Where one window takes places along both axes at once (it was above one wi
 closes and left of another), each is cut along one axis, and a corner of a place can show
 what lies behind until the window reaches it.
 
+For a window that moves, scripts can read where it was before it moved:
+
+| Variable | Is |
+|---|---|
+| `plugin-win-cause-sx`, `-sy`, `-sw`, `-sh` | where the window was before it moved, minus where it is: `window-x + plugin-win-cause-sx` is where its rectangle starts |
+
+A window that i3 doesn't manage has 0 for all of them, so a script can always add them.
+
+A style that bends a window off its straight way can keep it with its neighbours:
+
+| Variable | Is |
+|---|---|
+| `plugin-win-cause-seam-left`, `-seam-top`, `-seam-right`, `-seam-bottom` | 1 if that side of the window faces a tiled neighbour across the same gap (at most 64 px) where the change starts and where it ends, so the two go on together; 0 if not. A dock, such as a bar, is no tiled neighbour |
+
 ## How it works
 
 - picom hands the plugin each X event it reads (`add_x_event_callback`). So the plugin has one
