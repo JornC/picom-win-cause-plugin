@@ -5,7 +5,7 @@ own animation. It holds what is specific to i3. picom stays neutral: it only see
 names, and scripts decide how things look. Neither i3 nor picom knows what a swirl is.
 
 Needs plugin API 0.12 of the picom fork (`rename_trigger`, `add_x_event_callback`,
-`window_animation_output`). It works with a stock i3.
+`pause_screen`, `window_animation_output`). It works with a stock i3.
 
 ## Use
 
@@ -154,6 +154,12 @@ what lies behind until the window reaches it.
   that moves it now, and whether it is mapped and floating, for the split line. A frame
   whose client went stays known a while, as picom asks for its close animation's variables
   after the frame is gone.
+- When a window arrives, the plugin holds picom's screen (`pause_screen`) until i3 has
+  moved the others and picom has the new window's first picture, at most 0.1 s. picom then
+  starts the animations of the whole change in one pass, on one clock, and the new window
+  shows from the first frame. Without it, the new window starts a pass or more after its
+  neighbours, as picom first asks the X server about it. Other causes don't hold: i3 sends
+  their moves in one go.
 - A window that moves while a cause is open gets that change renamed
   (`rename_trigger` from `geometry`). A rename starts nothing by itself: picom still decides whether
   the window moved, and whether that is held back. A window that opens, closes, shows or hides
@@ -194,8 +200,8 @@ if that window moves, so a focus change alone costs no wait.
 runs the tests, on X. They run the `i3` and `i3-msg` first on `PATH`.
 
 Runs real i3, xterm and picom on its own Xvfb, and checks in picom's log which trigger each
-action started, and in its frame timing log the split line of each window that opens or
-closes. `WC_BACKEND=glx` and `WC_ROUNDS=n` change
+action started, and in its frame timing log that the windows of a change start in one frame
+and the split line of each window that opens or closes. `WC_BACKEND=glx` and `WC_ROUNDS=n` change
 how.
 
 `tests/scene.py` runs a list of changes on Xvfb, with i3, picom and real or test programs,

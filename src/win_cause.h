@@ -25,6 +25,12 @@ static_assert(false, "picom/api.h is not compatible: win-cause needs plugin "
                      "source tree, run make PICOM_API_CFLAGS=-I/path/to/picom/include");
 #endif
 
+/// How long the screen waits at most for a change to be complete, in seconds, from the
+/// event that opened its cause: for i3's answer, normally within a round trip, and for a
+/// new window's first picture, which a terminal draws in a few frames. Below what one
+/// notices as a delay; after it, picom goes on without them.
+#define WC_HOLD 0.1
+
 /// Frames whose client went, kept for the variables of their close animation, which
 /// starts a pass or a few later. More than this many windows don't close at once.
 #define WC_CLOSED_KEPT 32
@@ -77,6 +83,14 @@ struct name {
 	char *text;
 };
 
+/// A window that opens, which the hold waits for: until i3 has answered the cause that
+/// its arrival opened, and picom has its first picture.
+struct awaited {
+	xcb_window_t frame;
+	uint32_t token;
+	bool drawn;
+};
+
 #define PUSH(list, count, value)                                                         \
 	do {                                                                             \
 		list = realloc(list, sizeof(*(list)) * ((count) + 1));                   \
@@ -100,6 +114,17 @@ struct wc_state {
 	bool i3;
 	uint32_t next_token;
 	uint64_t closes;
+	/// A window opened since the last frame callback (`hold`), and the screen waits
+	/// for the windows in `awaited` until `hold_until` (`holding`), so that all
+	/// windows of the change start their animations in one pass.
+	bool hold, holding;
+	double hold_until;
+	/// The screen is paused for the hold.
+	bool paused;
+	struct awaited *awaited;
+	size_t n_awaited;
+	/// The event code of the Damage extension's DamageNotify, 0 without it.
+	uint8_t damage_notify;
 	struct frame *frames;
 	struct cause *causes;
 	struct rename *renames;

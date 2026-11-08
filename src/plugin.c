@@ -21,7 +21,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
+#include <xcb/damage.h>
 #include <xcb/xcb.h>
 #include <xcb/xcbext.h>
 
@@ -179,6 +181,15 @@ static uint32_t wc_open_cause(const char *trigger, xcb_window_t only, xcb_window
 	return token;
 }
 
+static bool wc_cause_open(uint32_t token) {
+	for (size_t i = 0; i < wc.n_causes; i++) {
+		if (wc.causes[i].token == token) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /// The cause of a frame's move: the newest wins.
 static const struct cause *wc_cause_for(xcb_window_t frame) {
 	for (size_t i = wc.n_causes; i > 0; i--) {
@@ -306,6 +317,11 @@ static void wc_on_reparent(const xcb_reparent_notify_event_t *e) {
 	if (e->event == wc.root && e->parent != wc.root) {
 		auto token = wc_open_cause("moved-by-open", XCB_NONE, e->parent);
 		wc_add_frame(e->parent, e->window)->opened = token;
+		if (token != 0) {
+			PUSH(wc.awaited, wc.n_awaited,
+			     ((struct awaited){e->parent, token, false}));
+			wc.hold = true;
+		}
 	}
 }
 
@@ -395,10 +411,26 @@ static void wc_on_message(const xcb_client_message_event_t *e) {
 	}
 }
 
+/// picom has a frame's first picture, or the frame went: the hold no longer waits for
+/// it to draw.
+static void wc_drawn(xcb_window_t id) {
+	for (size_t i = 0; i < wc.n_awaited; i++) {
+		if (wc.awaited[i].frame == id) {
+			wc.awaited[i].drawn = true;
+		}
+	}
+}
+
 static void wc_x_event(const void *event, void *user_data) {
 	(void)user_data;
 	const xcb_generic_event_t *e = event;
 	uint8_t type = e->response_type & 0x7f;
+	if (wc.damage_notify != 0 && type == wc.damage_notify) {
+		// picom's damage objects are on the frames: picom manages this one, and
+		// it has drawn.
+		wc_drawn(((const xcb_damage_notify_event_t *)event)->drawable);
+		return;
+	}
 	if (type == XCB_CLIENT_MESSAGE) {
 		wc_on_message(event);
 		return;
@@ -420,6 +452,7 @@ static void wc_x_event(const void *event, void *user_data) {
 	}
 	case XCB_DESTROY_NOTIFY: {
 		auto window = ((const xcb_destroy_notify_event_t *)event)->window;
+		wc_drawn(window);
 		wc_on_client_gone(window);
 		wc_close_cause(window);
 		break;
@@ -725,6 +758,43 @@ static double wc_line_variable(const struct picom_animation_start *start, void *
 	}
 }
 
+static bool wc_awaiting(void) {
+	for (size_t i = 0; i < wc.n_awaited; i++) {
+		if (!wc.awaited[i].drawn || wc_cause_open(wc.awaited[i].token)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static double wc_now(void) {
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (double)now.tv_sec + (double)now.tv_nsec / 1e9;
+}
+
+/// Holds the screen from the arrival of a window until the change is complete: i3 has
+/// moved the others, and picom has the new window's first picture. picom then starts
+/// the animations of the whole change in one pass, on one clock, and the new window
+/// shows from the first frame. Without it, it starts a pass or more after its
+/// neighbours: picom first asks the X server about it, and draws it once it has drawn.
+/// At most WC_HOLD from the first arrival; another one in that time joins the change.
+/// Other causes don't hold: i3 sends their moves in one go anyway.
+static void wc_hold(double now) {
+	bool waiting = wc_awaiting();
+	if (wc.hold && waiting && !wc.holding) {
+		wc.hold_until = now + WC_HOLD;
+		wc.holding = true;
+	}
+	wc.hold = false;
+	if (wc.holding && (!waiting || now >= wc.hold_until)) {
+		wc.holding = false;
+	}
+	if (!wc.holding) {
+		wc.n_awaited = 0;
+	}
+}
+
 static const char *const wc_crop[] = {"crop-x", "crop-y", "crop-width", "crop-height"};
 
 /// A crop box in whole pixels, edge by edge.
@@ -768,9 +838,24 @@ static void wc_frame_callback(uint64_t frame, void *user_data) {
 			wc.frames[i].drawn = wc.frames[i].shown;
 		}
 	}
-	// picom runs the animations in this pass: what it has now is what it shows.
-	for (size_t i = 0; i < wc.n_frames; i++) {
-		wc.frames[i].shown = wc.frames[i].rect;
+	double now = wc_now();
+	wc_hold(now);
+	bool runs = !(wc.holding && wc.hold_until > now);
+	if (!runs) {
+		wc.paused = wc.api->pause_screen("plugin-win-cause", wc.hold_until - now, 0);
+	} else {
+		if (wc.paused) {
+			wc.api->pause_screen("plugin-win-cause", 0, 0);
+			wc.paused = false;
+		}
+		// picom runs the animations in this pass: what it has now is what it
+		// shows.
+		for (size_t i = 0; i < wc.n_frames; i++) {
+			auto f = &wc.frames[i];
+			if (memcmp(&f->shown, &f->rect, sizeof(f->rect)) != 0) {
+				f->shown = f->rect;
+			}
+		}
 	}
 	for (size_t i = 0; i < wc.n_renames; i++) {
 		wc.api->rename_trigger(wc.renames[i].frame, "geometry", wc.renames[i].trigger);
@@ -811,6 +896,12 @@ __attribute__((constructor)) static void wc_init(void) {
 	if (!wc.i3) {
 		wc_fail("i3 is not running, so no window gets a cause");
 	}
+	auto damage = xcb_query_extension_reply(
+	    wc.c, xcb_query_extension(wc.c, strlen("DAMAGE"), "DAMAGE"), NULL);
+	if (damage != NULL && damage->present) {
+		wc.damage_notify = damage->first_event + XCB_DAMAGE_NOTIFY;
+	}
+	free(damage);
 	wc_scan();
 	static const char *const triggers[] = {"moved-by-open", "moved-by-close",
 	                                       "moved-by-fullscreen", "moved-by-float"};

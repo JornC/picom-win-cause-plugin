@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Checks which trigger each real i3 action starts, from picom's own log, and the split
-line the plugin gives the scripts of a window that opens or closes, from picom's frame
-timing log.
+"""Checks which trigger each real i3 action starts, from picom's own log, and from picom's
+frame timing log that the windows of one change start in one frame, and the split line the
+plugin gives the scripts of a window that opens or closes.
 
 Needs PICOM, a picom with the plugin API that src/win_cause.h names. Runs on its own Xvfb.
 """
@@ -100,8 +100,9 @@ def starts():
 
 
 def frame_log():
-	"""The script values picom drew since the last call, from its frame timing log, as
-	{frame: {name: value}}, from the last frame that drew each window."""
+	"""What picom's frame timing log has since the last call: the script values of the
+	last frame that drew each window, as {frame: {name: value}}, and the rendered frames
+	in which animations started on each window, as {frame: [number, ...]}."""
 	global frames_seen
 	data = b""
 	if os.path.getsize(frames_file) < frames_seen:
@@ -116,25 +117,32 @@ def frame_log():
 	new = new[:new.rfind(b"\n") + 1]
 	frames_seen += len(new)
 	data += new
-	scripts = {}
+	scripts, started, pending = {}, {}, []
 	for line in data.decode(errors="replace").splitlines():
 		p = line.split(",")
 		if p[0] == "E":
 			scripts[p[2]] = {k: float(v) for k, v in (kv.split("=", 1) for kv in p[5:])}
-	return scripts
+		elif p[0] == "A":
+			pending.append(p[2])
+		elif p[0] == "R":
+			for window in pending:
+				started.setdefault(window, []).append(int(p[1]))
+			pending = []
+	return scripts, started
 
 
 def settle():
 	time.sleep(settling)
 
 
-def check(step, expected, quiet=()):
-	"""Each window of `expected` started only those triggers, those in `quiet` nothing."""
+def check(step, expected, quiet=(), together=()):
+	"""Each window of `expected` started only those triggers, those in `quiet` nothing, and
+	those in `together` all in one frame."""
 	global checks, drawn
 	checks += 1
 	settle()
 	seen = starts()
-	drawn = frame_log()
+	drawn, started = frame_log()
 	for name, wanted in expected.items():
 		got = set(seen.get(name, []))
 		if not got or not got <= wanted:
@@ -142,6 +150,10 @@ def check(step, expected, quiet=()):
 	for name in quiet:
 		if name in seen:
 			failures.append(f"{step}: {name} started {sorted(seen[name])}, wanted nothing")
+	frames = {n for name in together for n in started.get(frame_ids.get(name), [])}
+	if together and len(frames) != 1:
+		failures.append(f"{step}: {', '.join(together)} started in frames {sorted(frames)}, "
+		                "wanted one")
 
 
 def overlap(a, b):
@@ -218,28 +230,32 @@ try:
 		# from, and goes back into it when it closes.
 		old = tree_windows("rect")
 		c = open_window("c")
-		check("open", {"a": {"moved-by-open"}, "b": {"moved-by-open"}, "c": {"open"}})
+		check("open", {"a": {"moved-by-open"}, "b": {"moved-by-open"}, "c": {"open"}},
+		      together="abc")
 		new = tree_windows("rect")
 		check_line("open: line", "c", new["c"], [old["a"], old["b"]])
 		i3("[title=^c$] kill")
-		check("close through i3", {"a": {"moved-by-close"}, "b": {"moved-by-close"}})
+		check("close through i3", {"a": {"moved-by-close"}, "b": {"moved-by-close"}},
+		      together="abc")
 		after = tree_windows("rect")
 		check_line("close through i3: line", "c", new["c"], [after["a"], after["b"]])
 		wait_for(lambda: c.poll() is not None, "c to go")
 		c = open_window("c")
-		check("open again", {"a": {"moved-by-open"}, "b": {"moved-by-open"}})
+		check("open again", {"a": {"moved-by-open"}, "b": {"moved-by-open"}}, together="abc")
 		new = tree_windows("rect")
 		check_line("open again: line", "c", new["c"], [old["a"], old["b"]])
 		c.terminate()
 		c.wait()
-		check("close by the app", {"a": {"moved-by-close"}, "b": {"moved-by-close"}})
+		check("close by the app", {"a": {"moved-by-close"}, "b": {"moved-by-close"}},
+		      together="abc")
 		check_line("close by the app: line", "c", new["c"], [after["a"], after["b"]])
 		i3("[title=^a$] fullscreen enable")
-		check("fullscreen on", {"a": {"moved-by-fullscreen"}, "b": {"hide"}})
+		check("fullscreen on", {"a": {"moved-by-fullscreen"}, "b": {"hide"}}, together="ab")
 		i3("[title=^a$] fullscreen disable")
-		check("fullscreen off", {"a": {"moved-by-fullscreen"}, "b": {"show"}})
+		check("fullscreen off", {"a": {"moved-by-fullscreen"}, "b": {"show"}}, together="ab")
 		i3("[title=^a$] floating enable")
-		check("floating on", {"a": {"moved-by-float"}, "b": {"moved-by-float"}})
+		check("floating on", {"a": {"moved-by-float"}, "b": {"moved-by-float"}},
+		      together="ab")
 		i3("[title=^a$] floating disable")
 		check("floating off: the signal comes after the move", {"a": OWN, "b": OWN})
 		i3("[title=^a$] focus")
