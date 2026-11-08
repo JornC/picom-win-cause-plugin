@@ -16,6 +16,7 @@
 /// on picom's main thread. What we ask, we take in the frame callback, or when a window
 /// moved and its answer decides the cause.
 
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,7 +64,7 @@ static const char *wc_atom_name(xcb_atom_t atom) {
 
 static struct frame *wc_frame_of_client(xcb_window_t client) {
 	for (size_t i = 0; i < wc.n_frames; i++) {
-		if (wc.frames[i].client == client) {
+		if (wc.frames[i].client == client && wc.frames[i].closed == 0) {
 			return &wc.frames[i];
 		}
 	}
@@ -79,9 +80,42 @@ static struct frame *wc_frame(xcb_window_t id) {
 	return NULL;
 }
 
+static void wc_drop_frame(size_t i) {
+	if (wc.frames[i].reading) {
+		xcb_discard_reply(wc.c, wc.frames[i].state.sequence);
+	}
+	wc.frames[i] = wc.frames[--wc.n_frames];
+}
+
+/// Drops what we kept of frames with this id: X gave the id to a new one.
+static void wc_forget(xcb_window_t id) {
+	for (size_t i = wc.n_frames; i > 0; i--) {
+		if (wc.frames[i - 1].id == id) {
+			wc_drop_frame(i - 1);
+		}
+	}
+}
+
 static struct frame *wc_add_frame(xcb_window_t id, xcb_window_t client) {
+	wc_forget(id);
 	PUSH(wc.frames, wc.n_frames, ((struct frame){.id = id, .client = client}));
 	return &wc.frames[wc.n_frames - 1];
+}
+
+/// Keeps the last WC_CLOSED_KEPT frames whose client went.
+static void wc_trim_closed(void) {
+	size_t closed = 0, oldest = 0;
+	for (size_t i = 0; i < wc.n_frames; i++) {
+		if (wc.frames[i].closed == 0) {
+			continue;
+		}
+		if (closed++ == 0 || wc.frames[i].closed < wc.frames[oldest].closed) {
+			oldest = i;
+		}
+	}
+	if (closed > WC_CLOSED_KEPT) {
+		wc_drop_frame(oldest);
+	}
 }
 
 static void wc_close_cause(uint32_t token) {
@@ -124,9 +158,10 @@ static void wc_take_compositor(void) {
 	free(reply);
 }
 
-static void wc_open_cause(const char *trigger, xcb_window_t only, xcb_window_t except) {
+/// Returns the cause's token, 0 if none opened.
+static uint32_t wc_open_cause(const char *trigger, xcb_window_t only, xcb_window_t except) {
 	if (!wc.i3 || wc.compositor == XCB_NONE) {
-		return;
+		return 0;
 	}
 	wc_ask_compositor();
 	uint32_t token = WC_TOKEN_PLUGIN | wc.next_token++;
@@ -141,6 +176,7 @@ static void wc_open_cause(const char *trigger, xcb_window_t only, xcb_window_t e
 	xcb_send_event(wc.c, 0, wc.root, XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT,
 	               (const char *)&sync);
 	xcb_flush(wc.c);
+	return token;
 }
 
 /// The cause of a frame's move: the newest wins.
@@ -202,13 +238,37 @@ static bool wc_i3_runs(void) {
 	return runs;
 }
 
-/// Reads what X has of a frame: whether its client is fullscreen.
+static struct rect
+wc_rect(int16_t x, int16_t y, uint16_t width, uint16_t height, uint16_t border) {
+	return (struct rect){x, y, width + 2 * border, height + 2 * border};
+}
+
+/// Reads what X has of a frame: where it is, whether it shows, and whether its client is
+/// fullscreen or floating.
 static void wc_read_frame(struct frame *frame) {
+	auto geometry_read = xcb_get_geometry(wc.c, frame->id);
+	auto attributes_read = xcb_get_window_attributes(wc.c, frame->id);
 	auto state_read =
 	    xcb_get_property(wc.c, 0, frame->client, wc.a_state, XCB_ATOM_ATOM, 0, 32);
+	auto floating_read =
+	    xcb_get_property(wc.c, 0, frame->client, wc.a_floating, XCB_ATOM_ANY, 0, 1);
+	auto geometry = xcb_get_geometry_reply(wc.c, geometry_read, NULL);
+	auto attributes = xcb_get_window_attributes_reply(wc.c, attributes_read, NULL);
 	auto state = xcb_get_property_reply(wc.c, state_read, NULL);
+	auto floating = xcb_get_property_reply(wc.c, floating_read, NULL);
+	if (geometry != NULL) {
+		frame->rect = wc_rect(geometry->x, geometry->y, geometry->width,
+		                      geometry->height, geometry->border_width);
+		frame->before = frame->shown = frame->drawn = frame->rect;
+		frame->placed = true;
+	}
+	frame->mapped = attributes != NULL && attributes->map_state != XCB_MAP_STATE_UNMAPPED;
 	frame->fullscreen = wc_has_atom(state, wc.a_fullscreen);
+	frame->floating = floating != NULL && floating->type != XCB_ATOM_NONE;
+	free(geometry);
+	free(attributes);
 	free(state);
+	free(floating);
 }
 
 /// The windows that were there before we came. New ones come from the events.
@@ -234,14 +294,18 @@ static void wc_on_reparent(const xcb_reparent_notify_event_t *e) {
 	auto frame = wc_frame_of_client(e->window);
 	if (frame != NULL) {
 		// i3 gave the client a new frame.
-		if (e->parent != wc.root) {
+		if (e->parent != wc.root && e->parent != frame->id) {
+			auto client = frame->client;
+			wc_forget(e->parent);
+			frame = wc_frame_of_client(client);
 			frame->id = e->parent;
+			frame->placed = frame->mapped = false;
 		}
 		return;
 	}
 	if (e->event == wc.root && e->parent != wc.root) {
-		wc_open_cause("moved-by-open", XCB_NONE, e->parent);
-		wc_add_frame(e->parent, e->window);
+		auto token = wc_open_cause("moved-by-open", XCB_NONE, e->parent);
+		wc_add_frame(e->parent, e->window)->opened = token;
 	}
 }
 
@@ -253,9 +317,27 @@ static void wc_on_configure(const xcb_configure_notify_event_t *e) {
 	if (frame->reading) {
 		wc_take_state(frame, true);
 	}
+	auto rect = wc_rect(e->x, e->y, e->width, e->height, e->border_width);
 	auto cause = wc_cause_for(frame->id);
+	uint32_t token = cause != NULL ? cause->token : 0;
+	if (!frame->placed) {
+		frame->shown = frame->drawn = rect;
+	}
+	if (!frame->placed || frame->cause != token) {
+		frame->before = frame->placed ? frame->rect : rect;
+		frame->cause = token;
+	}
+	frame->rect = rect;
+	frame->placed = true;
 	if (cause != NULL) {
 		PUSH(wc.renames, wc.n_renames, ((struct rename){frame->id, cause->trigger}));
+	}
+}
+
+static void wc_on_map(xcb_window_t window, bool mapped) {
+	auto frame = wc_frame(window);
+	if (frame != NULL) {
+		frame->mapped = mapped;
 	}
 }
 
@@ -266,9 +348,11 @@ static void wc_on_client_gone(xcb_window_t client) {
 		auto id = frame->id;
 		if (frame->reading) {
 			xcb_discard_reply(wc.c, frame->state.sequence);
+			frame->reading = false;
 		}
-		*frame = wc.frames[--wc.n_frames];
-		wc_open_cause("moved-by-close", XCB_NONE, id);
+		frame->closed = ++wc.closes;
+		wc_trim_closed();
+		frame->closing = wc_open_cause("moved-by-close", XCB_NONE, id);
 	}
 }
 
@@ -287,9 +371,12 @@ static void wc_on_property(const xcb_property_notify_event_t *e) {
 	}
 	if (e->atom == wc.a_state) {
 		wc_read_state(frame);
-	} else if (e->atom == wc.a_floating && e->state == XCB_PROPERTY_NEW_VALUE) {
-		// The window that floats, and the windows that take its place.
-		wc_open_cause("moved-by-float", XCB_NONE, XCB_NONE);
+	} else if (e->atom == wc.a_floating) {
+		frame->floating = e->state == XCB_PROPERTY_NEW_VALUE;
+		if (frame->floating) {
+			// The window that floats, and the windows that take its place.
+			wc_open_cause("moved-by-float", XCB_NONE, XCB_NONE);
+		}
 	}
 }
 
@@ -322,9 +409,15 @@ static void wc_x_event(const void *event, void *user_data) {
 	switch (type) {
 	case XCB_REPARENT_NOTIFY: wc_on_reparent(event); break;
 	case XCB_CONFIGURE_NOTIFY: wc_on_configure(event); break;
-	case XCB_UNMAP_NOTIFY:
-		wc_on_client_gone(((const xcb_unmap_notify_event_t *)event)->window);
+	case XCB_MAP_NOTIFY:
+		wc_on_map(((const xcb_map_notify_event_t *)event)->window, true);
 		break;
+	case XCB_UNMAP_NOTIFY: {
+		auto window = ((const xcb_unmap_notify_event_t *)event)->window;
+		wc_on_map(window, false);
+		wc_on_client_gone(window);
+		break;
+	}
 	case XCB_DESTROY_NOTIFY: {
 		auto window = ((const xcb_destroy_notify_event_t *)event)->window;
 		wc_on_client_gone(window);
@@ -334,6 +427,326 @@ static void wc_x_event(const void *event, void *user_data) {
 	case XCB_PROPERTY_NOTIFY: wc_on_property(event); break;
 	default: break;
 	}
+}
+
+static bool wc_overlap(struct rect a, struct rect b) {
+	return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height &&
+	       b.y < a.y + a.height;
+}
+
+static bool wc_near(int32_t a, int32_t b) {
+	return a - b <= 1 && b - a <= 1;
+}
+
+/// Where a rect starts and ends along axis 0 (x) or 1 (y).
+static int32_t wc_lo(struct rect r, int axis) {
+	return axis == 0 ? r.x : r.y;
+}
+
+static int32_t wc_hi(struct rect r, int axis) {
+	return axis == 0 ? r.x + r.width : r.y + r.height;
+}
+
+/// Whether `n` shares a split along `axis` with `r`: the same span across it, within a
+/// pixel, where `n` is `beside` `r`, and `r` is part of `n`'s span along it where `n`
+/// is `at`, short of at least one end.
+static bool wc_splits(struct rect r, struct rect at, struct rect beside, int axis) {
+	int across = 1 - axis;
+	return wc_near(wc_lo(beside, across), wc_lo(r, across)) &&
+	       wc_near(wc_hi(beside, across), wc_hi(r, across)) &&
+	       (wc_lo(r, axis) > wc_lo(at, axis) || wc_hi(r, axis) < wc_hi(at, axis));
+}
+
+/// Whether `n` is a tiled neighbour of `self` that overlaps it, and where. `at` is
+/// where it is when the window opens or closes: at an open where it was before the open
+/// moved it; at a close where i3 moved it (i3 moves the others before the frame goes).
+/// `beside` is where it is next to the window's rect, in the same layout: at an open
+/// where it is now, at a close where it was before. With smart_gaps, the two have other
+/// gaps when the window is the second on its workspace.
+static bool wc_neighbour(const struct frame *self, struct rect r, const struct frame *n,
+                         bool open, struct rect *at, struct rect *beside) {
+	if (n == self || !n->placed || !n->mapped || n->floating || n->closed != 0) {
+		return false;
+	}
+	bool moved = open ? self->opened != 0 && n->cause == self->opened
+	                  : self->closing != 0 && n->cause == self->closing;
+	*at = open && moved ? n->before : n->rect;
+	*beside = !open && moved ? n->before : n->rect;
+	return wc_overlap(r, *at);
+}
+
+/// Rect `r` collapsed onto the line at `at` along `axis`.
+static struct rect wc_line_at(struct rect r, int axis, int64_t at) {
+	return axis == 0 ? (struct rect){(int32_t)at, r.y, 0, r.height}
+	                 : (struct rect){r.x, (int32_t)at, r.width, 0};
+}
+
+/// The line where a window split from its neighbours, see wc_split_line. The axis is the
+/// one along which a neighbour shares a split with it (both or neither: no line). The
+/// line is the edge of such a neighbour that lies within the window's span, the one
+/// nearest its middle if there are more. For a plain i3 split there is exactly one: where
+/// the window went in, or its far edge if it took half of one window. Where gaps come or
+/// go with the change (smart_gaps), the neighbour's edge at the side of the workspace
+/// lies outside the window's span by as much as its span across changed, and the line is
+/// at the window's edge there.
+static bool
+wc_shared_line(const struct frame *self, struct rect r, bool open, struct rect *line) {
+	bool splits[2] = {false, false};
+	for (size_t i = 0; i < wc.n_frames; i++) {
+		struct rect at, beside;
+		if (wc_neighbour(self, r, &wc.frames[i], open, &at, &beside)) {
+			splits[0] |= wc_splits(r, at, beside, 0);
+			splits[1] |= wc_splits(r, at, beside, 1);
+		}
+	}
+	if (splits[0] == splits[1]) {
+		return false;
+	}
+	int axis = splits[0] ? 0 : 1, across = 1 - axis;
+	int64_t lo = wc_lo(r, axis), hi = wc_hi(r, axis);
+	bool found = false;
+	int64_t best = 0;
+	for (size_t i = 0; i < wc.n_frames; i++) {
+		struct rect at, beside;
+		if (!wc_neighbour(self, r, &wc.frames[i], open, &at, &beside) ||
+		    !wc_splits(r, at, beside, axis)) {
+			continue;
+		}
+		int64_t gaps = llabs((int64_t)wc_lo(at, across) - wc_lo(beside, across));
+		int64_t far = llabs((int64_t)wc_hi(at, across) - wc_hi(beside, across));
+		gaps = far > gaps ? far : gaps;
+		for (int end = 0; end < 2; end++) {
+			int64_t edge = end == 0 ? wc_lo(at, axis) : wc_hi(at, axis);
+			edge = edge < lo && edge >= lo - gaps   ? lo
+			       : edge > hi && edge <= hi + gaps ? hi
+			                                        : edge;
+			if (edge >= lo && edge <= hi &&
+			    (!found || llabs(2 * edge - lo - hi) < llabs(2 * best - lo - hi))) {
+				best = edge;
+				found = true;
+			}
+		}
+	}
+	if (!found) {
+		return false;
+	}
+	*line = wc_line_at(r, axis, best);
+	return true;
+}
+
+/// How far two rects overlap along `axis`, less than 0 if they don't.
+static int64_t wc_common(struct rect a, struct rect b, int axis) {
+	int64_t lo = wc_lo(a, axis) > wc_lo(b, axis) ? wc_lo(a, axis) : wc_lo(b, axis);
+	int64_t hi = wc_hi(a, axis) < wc_hi(b, axis) ? wc_hi(a, axis) : wc_hi(b, axis);
+	return hi - lo;
+}
+
+/// The far side of a window that shares no line with its neighbours, see wc_split_line:
+/// such as one that closes with the window next to it, when one neighbour takes both
+/// places, or one next to a split of the other axis. Each neighbour that takes its place
+/// (at a close) or makes room for it (at an open) pushes it away from the side it lies
+/// on, by the area of its place that it takes or gave. The side is where the neighbour
+/// lies wholly beyond the window's edge, within a pixel, and the two overlap across:
+/// where the screen showed it last at a close, where i3 put it at an open. The line is
+/// the window's edge that the pushes point to, along the axis they push most, the
+/// vertical edge on a tie. A neighbour that lies on no side (it overlaps the window, as
+/// the next tab or a fullscreen window does) pushes nothing, and with no push, or pushes
+/// that cancel out, there is no line.
+static bool
+wc_far_side(const struct frame *self, struct rect r, bool open, struct rect *line) {
+	int64_t push[2] = {0, 0};
+	for (size_t i = 0; i < wc.n_frames; i++) {
+		auto n = &wc.frames[i];
+		struct rect at, beside;
+		if (!wc_neighbour(self, r, n, open, &at, &beside)) {
+			continue;
+		}
+		auto lies = open ? n->rect : n->drawn;
+		int64_t place = wc_common(r, at, 0) * wc_common(r, at, 1);
+		for (int axis = 0; axis < 2; axis++) {
+			if (wc_common(lies, r, 1 - axis) <= 0) {
+				continue;
+			}
+			if (wc_hi(lies, axis) <= wc_lo(r, axis) + 1) {
+				push[axis] += place;
+			} else if (wc_lo(lies, axis) >= wc_hi(r, axis) - 1) {
+				push[axis] -= place;
+			}
+		}
+	}
+	if (push[0] == 0 && push[1] == 0) {
+		return false;
+	}
+	int axis = llabs(push[0]) >= llabs(push[1]) ? 0 : 1;
+	*line = wc_line_at(r, axis, push[axis] > 0 ? wc_hi(r, axis) : wc_lo(r, axis));
+	return true;
+}
+
+/// The rect a window that opens grows from, or that one that closes shrinks into: its
+/// own, collapsed onto a line. The line where it split from its neighbours, if it shares
+/// one with them (wc_shared_line), and if not, its far side from those that take its
+/// place or make room for it (wc_far_side). A window with neither, as the first on its
+/// workspace, has no line. `r` is the window's rect.
+static bool
+wc_split_line(const struct frame *self, struct rect r, bool open, struct rect *line) {
+	if (self->floating || r.width <= 0 || r.height <= 0) {
+		return false;
+	}
+	return wc_shared_line(self, r, open, line) || wc_far_side(self, r, open, line);
+}
+
+/// The place that a window that closes leaves, as the windows that take it reach into
+/// it: a rect that shrinks into a line on the change's curve, of which the window shows
+/// the part inside its own rect `r` (where the screen showed it last). The takers are
+/// its tiled neighbours where i3 put them (wc_neighbour). Each one that lies on a side
+/// of the window, where the screen showed it last (as in wc_far_side), counts for the
+/// axis it lies along, by the area of the place it takes; the axis is the one with
+/// more, the one across on a tie. Along it, the rect starts at the edges of the takers
+/// on either side, where the screen showed them, and at the window's own edge on a side
+/// with none; the line is where the takers on the side before it end, or with none
+/// there, those after it. As the takers move on the same curve, the rect's edges are
+/// theirs in every frame: the window is cut where they reach, also when windows next to
+/// it close with it, and its line then lies beyond its own rect, where the takers end.
+/// False if no taker lies on a side of it.
+static bool wc_close_region(const struct frame *self, struct rect r, struct rect *from,
+                            struct rect *line) {
+	int64_t weight[2] = {0, 0};
+	bool seen[2][2] = {{false, false}, {false, false}};
+	int32_t starts[2][2] = {{0, 0}, {0, 0}}, ends[2][2] = {{0, 0}, {0, 0}};
+	for (size_t i = 0; i < wc.n_frames; i++) {
+		auto n = &wc.frames[i];
+		struct rect at, beside;
+		if (!wc_neighbour(self, r, n, false, &at, &beside)) {
+			continue;
+		}
+		int64_t place = wc_common(r, at, 0) * wc_common(r, at, 1);
+		for (int axis = 0; axis < 2; axis++) {
+			if (wc_common(n->drawn, r, 1 - axis) <= 0) {
+				continue;
+			}
+			int side = wc_hi(n->drawn, axis) <= wc_lo(r, axis) + 1   ? 0
+			           : wc_lo(n->drawn, axis) >= wc_hi(r, axis) - 1 ? 1
+			                                                         : -1;
+			if (side < 0) {
+				continue;
+			}
+			weight[axis] += place;
+			int32_t start =
+			    side == 0 ? wc_hi(n->drawn, axis) : wc_lo(n->drawn, axis);
+			int32_t end = side == 0 ? wc_hi(n->rect, axis) : wc_lo(n->rect, axis);
+			// Where takers on one side differ, the one that reaches furthest.
+			bool further =
+			    !seen[axis][side] ||
+			    (side == 0 ? end > ends[axis][side] : end < ends[axis][side]);
+			if (further) {
+				starts[axis][side] = start;
+				ends[axis][side] = end;
+			}
+			seen[axis][side] = true;
+		}
+	}
+	if (weight[0] == 0 && weight[1] == 0) {
+		return false;
+	}
+	int axis = weight[0] >= weight[1] ? 0 : 1;
+	int32_t at = seen[axis][0] ? ends[axis][0] : ends[axis][1];
+	int32_t lo = seen[axis][0] ? starts[axis][0] : wc_lo(r, axis);
+	int32_t hi = seen[axis][1] ? starts[axis][1] : wc_hi(r, axis);
+	lo = at < lo ? at : lo;
+	hi = at > hi ? at : hi;
+	*from = axis == 0 ? (struct rect){lo, r.y, hi - lo, r.height}
+	                  : (struct rect){r.x, lo, r.width, hi - lo};
+	*line = wc_line_at(r, axis, at);
+	return true;
+}
+
+enum {
+	WC_LINE,
+	WC_LINE_X,
+	WC_LINE_Y,
+	WC_LINE_WIDTH,
+	WC_LINE_HEIGHT,
+	WC_LINE_FAR,
+	WC_FROM_X,
+	WC_FROM_Y,
+	WC_FROM_WIDTH,
+	WC_FROM_HEIGHT,
+};
+
+/// The variables plugin-win-cause-line*: for an open or a close, whether the window has
+/// a line (1 or 0), whether that line is its far side rather than a split line it
+/// shares with its neighbours (1 or 0), and the rect it grows from or shrinks into; for
+/// a close, plugin-win-cause-from* is the rect that shrinks into it (wc_close_region),
+/// for anything else the window's own rect. With no line, or for any other trigger, the
+/// window's own rect, or 0s if it is not a window i3 manages. picom asks for each
+/// variable on its own, so the line is worked out once per animation start.
+static double wc_line_variable(const struct picom_animation_start *start, void *user_data) {
+	int kind = strcmp(start->trigger, "open") == 0    ? 1
+	           : strcmp(start->trigger, "close") == 0 ? 2
+	                                                  : 0;
+	if (!wc.line.valid || wc.line.pass != start->frame ||
+	    wc.line.window != start->window || wc.line.kind != kind) {
+		wc.line.valid = true;
+		wc.line.pass = start->frame;
+		wc.line.window = start->window;
+		wc.line.kind = kind;
+		wc.line.found = wc.line.far = false;
+		wc.line.rect = wc.line.from = (struct rect){0, 0, 0, 0};
+		auto frame = wc_frame(start->window);
+		// A window closes from where the screen showed it: i3 may have moved it
+		// as it closes, as when its neighbour closed with it.
+		auto r = frame == NULL ? (struct rect){0, 0, 0, 0}
+		         : kind == 2   ? frame->drawn
+		                       : frame->rect;
+		if (frame != NULL && frame->placed) {
+			wc.line.rect = wc.line.from = r;
+		}
+		if (frame != NULL && frame->placed && kind == 1) {
+			wc.line.found = wc_split_line(frame, r, true, &wc.line.rect);
+		} else if (frame != NULL && frame->placed && kind == 2) {
+			wc.line.found =
+			    !frame->floating && r.width > 0 && r.height > 0 &&
+			    wc_close_region(frame, r, &wc.line.from, &wc.line.rect);
+		}
+		struct rect shared;
+		wc.line.far = wc.line.found && !wc_shared_line(frame, r, kind == 1, &shared);
+	}
+	switch ((intptr_t)user_data) {
+	case WC_LINE: return wc.line.found ? 1 : 0;
+	case WC_LINE_X: return wc.line.rect.x;
+	case WC_LINE_Y: return wc.line.rect.y;
+	case WC_LINE_WIDTH: return wc.line.rect.width;
+	case WC_LINE_HEIGHT: return wc.line.rect.height;
+	case WC_LINE_FAR: return wc.line.far ? 1 : 0;
+	case WC_FROM_X: return wc.line.from.x;
+	case WC_FROM_Y: return wc.line.from.y;
+	case WC_FROM_WIDTH: return wc.line.from.width;
+	default: return wc.line.from.height;
+	}
+}
+
+static const char *const wc_crop[] = {"crop-x", "crop-y", "crop-width", "crop-height"};
+
+/// A crop box in whole pixels, edge by edge.
+static struct rect wc_whole(const double box[4]) {
+	long x = lround(box[0]), y = lround(box[1]);
+	return (struct rect){(int32_t)x, (int32_t)y, (int32_t)(lround(box[0] + box[2]) - x),
+	                     (int32_t)(lround(box[1] + box[3]) - y)};
+}
+
+/// Where a frame's animation draws its rectangle, in whole pixels, edge by edge, so edges
+/// that windows share stay shared: as the last pass that ran it drew it. False if no
+/// animation crops it.
+static bool wc_drawn_rect(xcb_window_t frame, struct rect *r) {
+	double box[4];
+	for (int k = 0; k < 4; k++) {
+		if (!wc.api->window_animation_output(frame, wc_crop[k], &box[k]) ||
+		    !isfinite(box[k])) {
+			return false;
+		}
+	}
+	*r = wc_whole(box);
+	return true;
 }
 
 static void wc_frame_callback(uint64_t frame, void *user_data) {
@@ -347,6 +760,17 @@ static void wc_frame_callback(uint64_t frame, void *user_data) {
 		if (wc.frames[i].reading) {
 			wc_take_state(&wc.frames[i], false);
 		}
+	}
+	// Where the screen showed each frame last: its animation's rectangle, as the
+	// last pass that ran it drew it, or where picom had it then.
+	for (size_t i = 0; i < wc.n_frames; i++) {
+		if (!wc_drawn_rect(wc.frames[i].id, &wc.frames[i].drawn)) {
+			wc.frames[i].drawn = wc.frames[i].shown;
+		}
+	}
+	// picom runs the animations in this pass: what it has now is what it shows.
+	for (size_t i = 0; i < wc.n_frames; i++) {
+		wc.frames[i].shown = wc.frames[i].rect;
 	}
 	for (size_t i = 0; i < wc.n_renames; i++) {
 		wc.api->rename_trigger(wc.renames[i].frame, "geometry", wc.renames[i].trigger);
@@ -392,6 +816,13 @@ __attribute__((constructor)) static void wc_init(void) {
 	                                       "moved-by-fullscreen", "moved-by-float"};
 	for (size_t i = 0; i < sizeof(triggers) / sizeof(triggers[0]); i++) {
 		wc.api->add_animation_trigger(triggers[i]);
+	}
+	static const char *const line[] = {
+	    "line",     "line-x", "line-y", "line-width", "line-height",
+	    "line-far", "from-x", "from-y", "from-width", "from-height"};
+	for (intptr_t i = 0; i < (intptr_t)(sizeof(line) / sizeof(line[0])); i++) {
+		wc.api->add_animation_variable("plugin-win-cause", line[i],
+		                               wc_line_variable, (void *)i);
 	}
 	wc.api->add_x_event_callback(wc_x_event, NULL);
 	wc.api->add_frame_callback(wc_frame_callback, NULL);

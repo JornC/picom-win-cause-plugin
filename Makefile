@@ -9,13 +9,14 @@ CFLAGS ?= -O2 -g
 override CFLAGS += -std=gnu23 -Wall -Wextra -Wfatal-errors $(PICOM_API_CFLAGS) \
 	$(shell $(PKG_CONFIG) --cflags xcb)
 LDLIBS = $(shell $(PKG_CONFIG) --libs xcb)
+PLUGIN_LDLIBS = -lm
 
 all: build/win-cause.so build/win-cause build/slowclient
 
 build/win-cause.so: src/plugin.c src/protocol.h src/win_cause.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(LDFLAGS) -shared -fPIC -o $@ src/plugin.c \
-		$(LDLIBS)
+		$(LDLIBS) $(PLUGIN_LDLIBS)
 
 build/win-cause: src/cmd.c src/protocol.h
 	@mkdir -p build

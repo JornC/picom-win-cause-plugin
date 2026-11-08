@@ -14,7 +14,7 @@
 #include <picom/api.h>
 
 /// The plugin API the plugin needs is 0.WC_API_MINOR, as the picom fork numbers it.
-#define WC_API_MINOR 11
+#define WC_API_MINOR 12
 #define WC_STR(x) #x
 #define WC_XSTR(x) WC_STR(x)
 #define WC_API_VERSION "0." WC_XSTR(WC_API_MINOR)
@@ -25,10 +25,34 @@ static_assert(false, "picom/api.h is not compatible: win-cause needs plugin "
                      "source tree, run make PICOM_API_CFLAGS=-I/path/to/picom/include");
 #endif
 
+/// Frames whose client went, kept for the variables of their close animation, which
+/// starts a pass or a few later. More than this many windows don't close at once.
+#define WC_CLOSED_KEPT 32
+
+/// A frame's place in the root window, with its border: picom's window-x, window-y,
+/// window-width and window-height of it.
+struct rect {
+	int32_t x, y, width, height;
+};
+
 /// A window i3 manages: its client window, and the frame i3 made for it.
 struct frame {
 	xcb_window_t id, client;
-	bool fullscreen;
+	bool fullscreen, floating, mapped;
+	/// Where the frame is, once `placed`, and where it was before the cause with the
+	/// token `cause` first moved it.
+	bool placed;
+	struct rect rect, before;
+	uint32_t cause;
+	/// The token of the cause that the frame's own arrival opened, and of the one its
+	/// client's going opened, 0 if none.
+	uint32_t opened, closing;
+	/// Where the frame was in the last pass that picom ran its animations in: where
+	/// the screen last showed it, unless an animation draws it elsewhere. And where
+	/// the screen last showed it, its animation's rectangle if one runs.
+	struct rect shown, drawn;
+	/// When the client went, counting closes from 1; 0 while it is there.
+	uint64_t closed;
 	/// A read of _NET_WM_STATE is on its way, in `state`.
 	bool reading;
 	xcb_get_property_cookie_t state;
@@ -75,11 +99,20 @@ struct wc_state {
 	xcb_get_selection_owner_cookie_t compositor_read;
 	bool i3;
 	uint32_t next_token;
+	uint64_t closes;
 	struct frame *frames;
 	struct cause *causes;
 	struct rename *renames;
 	struct name *names;
 	size_t n_frames, n_causes, n_renames, n_names;
+	/// The split line of the last animation that asked, see wc_line_variable.
+	struct {
+		bool valid, found, far;
+		uint64_t pass;
+		uint32_t window;
+		int kind;
+		struct rect rect, from;
+	} line;
 };
 
 extern struct wc_state wc;

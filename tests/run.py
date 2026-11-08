@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Checks which trigger each real i3 action starts, from picom's own log.
+"""Checks which trigger each real i3 action starts, from picom's own log, and the split
+line the plugin gives the scripts of a window that opens or closes, from picom's frame
+timing log.
 
 Needs PICOM, a picom with the plugin API that src/win_cause.h names. Runs on its own Xvfb.
 """
@@ -26,11 +28,14 @@ OWN = {"size", "position"}
 
 work = tempfile.mkdtemp(prefix="win-cause-", dir=os.environ.get("XDG_RUNTIME_DIR"))
 log_file = f"{work}/picom.log"
+frames_file = f"{work}/frames.csv"
 socket = f"{work}/i3.sock"
 env = dict(os.environ, DISPLAY=DISPLAY, I3SOCK=socket)
 env.pop("WAYLAND_DISPLAY", None)
-log_seen = 0
+log_seen = frames_seen = 0
 settling = 0.25
+frame_ids = {}
+drawn = {}
 failures = []
 checks = 0
 
@@ -54,13 +59,17 @@ def wait_for(check, what, timeout=5.0):
 	raise AssertionError(f"timed out waiting for {what}")
 
 
-def tree_windows():
-	"""{name: client window} of i3's windows."""
+def tree_windows(what="window"):
+	"""{name: client window} of i3's windows, or with "rect", {name: (x, y, width, height)}
+	of their frames."""
 	found = {}
 
 	def walk(node):
 		if node.get("window"):
-			found[node["name"]] = node["window"]
+			value = node[what]
+			if what == "rect":
+				value = (value["x"], value["y"], value["width"], value["height"])
+			found[node["name"]] = value
 		for child in node.get("nodes", []) + node.get("floating_nodes", []):
 			walk(child)
 
@@ -75,16 +84,44 @@ def open_window(name):
 
 
 def starts():
-	"""What picom started since the last call, as {window name: [trigger, ...]}."""
+	"""What picom started since the last call, as {window name: [trigger, ...]}. Notes the
+	frame of each window in frame_ids."""
 	global log_seen
 	with open(log_file, "rb") as f:
 		f.seek(log_seen)
 		text = f.read().decode(errors="replace")
 		log_seen = f.tell()
 	found = {}
-	for trigger, name in re.findall(r"Starting animation (\S+) for window \S+ \((.*?)\)", text):
+	for trigger, frame, name in re.findall(
+			r"Starting animation (\S+) for window (\S+) \((.*?)\)", text):
 		found.setdefault(name, []).append(trigger)
+		frame_ids[name] = frame
 	return found
+
+
+def frame_log():
+	"""The script values picom drew since the last call, from its frame timing log, as
+	{frame: {name: value}}, from the last frame that drew each window."""
+	global frames_seen
+	data = b""
+	if os.path.getsize(frames_file) < frames_seen:
+		# picom starts a new log at 32 MiB, and keeps the old one as .old.
+		with open(f"{frames_file}.old", "rb") as f:
+			f.seek(frames_seen)
+			data = f.read()
+		frames_seen = 0
+	with open(frames_file, "rb") as f:
+		f.seek(frames_seen)
+		new = f.read()
+	new = new[:new.rfind(b"\n") + 1]
+	frames_seen += len(new)
+	data += new
+	scripts = {}
+	for line in data.decode(errors="replace").splitlines():
+		p = line.split(",")
+		if p[0] == "E":
+			scripts[p[2]] = {k: float(v) for k, v in (kv.split("=", 1) for kv in p[5:])}
+	return scripts
 
 
 def settle():
@@ -93,10 +130,11 @@ def settle():
 
 def check(step, expected, quiet=()):
 	"""Each window of `expected` started only those triggers, those in `quiet` nothing."""
-	global checks
+	global checks, drawn
 	checks += 1
 	settle()
 	seen = starts()
+	drawn = frame_log()
 	for name, wanted in expected.items():
 		got = set(seen.get(name, []))
 		if not got or not got <= wanted:
@@ -104,6 +142,33 @@ def check(step, expected, quiet=()):
 	for name in quiet:
 		if name in seen:
 			failures.append(f"{step}: {name} started {sorted(seen[name])}, wanted nothing")
+
+
+def overlap(a, b):
+	return a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
+
+
+def check_line(step, name, rect, neighbours):
+	"""The open or close script of window `name` read the split line: its rect on the
+	one edge of its neighbours (where they were before an open, or are after a close)
+	that lies in its span, for a window in a row; with no neighbours given, no line."""
+	global checks
+	checks += 1
+	values = drawn.get(frame_ids.get(name))
+	if values is None:
+		failures.append(f"{step}: no script values of {name} in the frame log")
+		return
+	got = tuple(values.get(f"var-line{k}") for k in ("", "-x", "-y", "-width", "-height"))
+	if neighbours is None:
+		if got[0] != 0:
+			failures.append(f"{step}: {name} has a split line {got}, wanted none")
+		return
+	x, y, w, h = rect
+	edges = {e for n in neighbours if overlap(rect, n) for e in (n[0], n[0] + n[2])
+	         if x <= e <= x + w}
+	wanted = (1, edges.pop(), y, 0, h) if len(edges) == 1 else f"one edge in {edges}"
+	if got != wanted:
+		failures.append(f"{step}: {name} grows from {got}, wanted {wanted}")
 
 
 def wm_command(*args):
@@ -137,7 +202,7 @@ try:
 	picom = subprocess.Popen(
 		[PICOM, "--backend", BACKEND, "--log-level=debug", f"--log-file={log_file}",
 		 f"--config={HERE}/picom.conf", "--plugins", PLUGIN],
-		env=env,
+		env=dict(env, PICOM_DEBUG=f"frame_timing={frames_file};frame_layout=1"),
 		stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 	processes.append(picom)
 	wait_for(lambda: os.path.exists(log_file), "picom")
@@ -146,19 +211,29 @@ try:
 	A, B = str(ids["a"]), str(ids["b"])
 	swap = ["i3-msg", "-s", socket, "[title=^b$] swap container with mark x"]
 	starts()
+	frame_log()
 
 	for number in range(ROUNDS):
-		# Causes picom can't know.
+		# Causes picom can't know. The window that opens grows out of the line it split
+		# from, and goes back into it when it closes.
+		old = tree_windows("rect")
 		c = open_window("c")
 		check("open", {"a": {"moved-by-open"}, "b": {"moved-by-open"}, "c": {"open"}})
+		new = tree_windows("rect")
+		check_line("open: line", "c", new["c"], [old["a"], old["b"]])
 		i3("[title=^c$] kill")
 		check("close through i3", {"a": {"moved-by-close"}, "b": {"moved-by-close"}})
+		after = tree_windows("rect")
+		check_line("close through i3: line", "c", new["c"], [after["a"], after["b"]])
 		wait_for(lambda: c.poll() is not None, "c to go")
 		c = open_window("c")
 		check("open again", {"a": {"moved-by-open"}, "b": {"moved-by-open"}})
+		new = tree_windows("rect")
+		check_line("open again: line", "c", new["c"], [old["a"], old["b"]])
 		c.terminate()
 		c.wait()
 		check("close by the app", {"a": {"moved-by-close"}, "b": {"moved-by-close"}})
+		check_line("close by the app: line", "c", new["c"], [after["a"], after["b"]])
 		i3("[title=^a$] fullscreen enable")
 		check("fullscreen on", {"a": {"moved-by-fullscreen"}, "b": {"hide"}})
 		i3("[title=^a$] fullscreen disable")
@@ -172,6 +247,7 @@ try:
 		# A window that opens or hides keeps that trigger, whatever moved it.
 		d = open_window("floats")
 		check("new window that floats", {"floats": {"open"}}, quiet=["a", "b"])
+		check_line("new window that floats: no line", "floats", None, None)
 		d.terminate()
 		d.wait()
 		settle()
