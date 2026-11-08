@@ -116,3 +116,14 @@ runs the tests, on X. They run the `i3` and `i3-msg` first on `PATH`.
 
 Runs real i3, xterm and picom on its own Xvfb, and checks in picom's log which trigger each
 action started. `WC_BACKEND=glx` and `WC_ROUNDS=n` change how.
+
+`tests/scene.py` runs a list of changes on Xvfb, with i3, picom and real or test programs,
+and keeps the marks and the frame log:
+
+    tests/scene.py out --program a=chrome --program b=wezterm \\
+        --scene key:alt+shift+Down --scene key:alt+shift+Right
+
+`--config` runs it with a picom.conf of your own, as picom finds it (its includes and plugins
+next to it, then in `XDG_CONFIG_HOME` and `XDG_CONFIG_DIRS`), `--i3` adds a line to i3's
+config, and a scene's `exec:` action runs a command on the display, with the output
+directory in `$SCENE_OUT`.

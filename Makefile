@@ -10,7 +10,7 @@ override CFLAGS += -std=gnu23 -Wall -Wextra -Wfatal-errors $(PICOM_API_CFLAGS) \
 	$(shell $(PKG_CONFIG) --cflags xcb)
 LDLIBS = $(shell $(PKG_CONFIG) --libs xcb)
 
-all: build/win-cause.so build/win-cause
+all: build/win-cause.so build/win-cause build/slowclient
 
 build/win-cause.so: src/plugin.c src/protocol.h src/win_cause.h
 	@mkdir -p build
@@ -20,6 +20,11 @@ build/win-cause.so: src/plugin.c src/protocol.h src/win_cause.h
 build/win-cause: src/cmd.c src/protocol.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ src/cmd.c $(LDLIBS)
+
+build/slowclient: tests/slowclient.c
+	@mkdir -p build
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/slowclient.c $(LDLIBS) \
+		$(shell $(PKG_CONFIG) --libs xcb-sync)
 
 # The tests that need no X server: what a package's check step runs.
 check: all
