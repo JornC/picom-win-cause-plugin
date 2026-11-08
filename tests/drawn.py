@@ -12,8 +12,8 @@ var-length is 1 s. Per window, from picom's frame log and the programs' own log 
 they drew:
 
   hidden  where picom saved the old picture, each frame of the animation draws it before
-          the style's hidden moment and the window's image from then on. Tile has no such
-          moment
+          the style's hidden moment and the window's image from then on: warp at its smallest
+          (var-q 0.5). Tile has no such moment
   waits   the first frame that draws the window's image at its new size starts after the
           program drew that size. For a, c and d, that is the first frame past the hidden
           moment; for b, at most three frames after the first one that starts after its
@@ -75,6 +75,7 @@ SIZE = (1280, 720)
 # style: (what the rule includes, the variable that passes 0.5 at the hidden moment, the
 # style's length in var-length)
 STYLES = {
+    "warp": ("@include \"win-cause/warp-geometry.conf\"", "var-q", 1.0),
     "tile": ("@include \"win-cause/tile-geometry.conf\"", None, 1.0),
 }
 # The styles that draw whichever picture covers more: the newest of a window that grows as

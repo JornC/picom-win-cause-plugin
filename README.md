@@ -204,6 +204,26 @@ copy them. Without `make install`, copy `styles/parts/` to
 `win-cause/parts/` next to `picom.conf`, as picom looks for included files from there, not
 next to the style.
 
+## Other styles
+
+`styles/` has more styles than tile. They build on it: its settings in `parts/tile.conf`,
+and their opens that wait for the window's first picture, so they need what tile needs,
+and some need more, as below. Each style's header says how it works, what you
+can change and how to use it. Most go in the rule of `tile.conf`, in its place, with their
+`-geometry.conf` file in the rule of `tile-geometry.conf`; pop and twirl have no
+such file, and `tile-geometry.conf` stays.
+
+- **domino**: tile, with each window of a change starting later the further right it
+  starts on its monitor, so a change ripples from left to right.
+- **pop**: a window that opens grows out of its middle and fades in, one that closes
+  shrinks into it and fades out. Goes with ws-direction's pop.
+- **spring**: tile on a damped spring: each rectangle goes a little past its place and
+  settles back.
+- **twirl**: pop with a turn in the plane of the screen. Goes with ws-direction's twirl.
+  Needs the corner outputs.
+- **warp**: a window that moves sinks into the middle of its old place and bursts out of
+  the middle of its new one.
+
 ## Variables
 
 For a window that opens or closes, scripts can read the line it splits from its
@@ -403,11 +423,11 @@ the overview shows, and a workspace switch and an overview that come during a ch
 `tests/covered.py` checks every style with a window that goes fullscreen and back, and
 closes, next to two others: in every frame of its animations the two are drawn as they are
 at rest, at full opacity, where they are, and behind it where they overlap.
-`tests/drawn.py` checks when the tile style trades a window's old picture for its newest:
-`tests/slowclient` windows get a new size and draw it at different times. The newest
-picture comes as soon as the program drew it, and reads of the screen show, inside each
-picture, the colour its program drew at the picture's size, never what lies behind nor
-another size's.
+`tests/drawn.py` checks the styles that trade a window's old picture for its newest at a
+moment where it is hidden (warp): two `tests/slowclient` windows get a new size, one draws
+it before that moment and one after. The newest picture comes at that moment for the first
+and as soon as it drew for the second, and reads of the screen show, inside each picture, the
+colour its program drew at the picture's size, never what lies behind nor another size's.
 `tests/opens.py` checks every style with two `tests/slowclient` windows whose first picture
 is empty for 0.4 s, one alone and one next to it: in every frame of each open, the
 animation's time is no more than the time since the program drew, so the first frame that
