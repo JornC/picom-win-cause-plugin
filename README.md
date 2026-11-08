@@ -160,6 +160,10 @@ what lies behind until the window reaches it.
   shows from the first frame. Without it, the new window starts a pass or more after its
   neighbours, as picom first asks the X server about it. Other causes don't hold: i3 sends
   their moves in one go.
+- i3 gives its frames a black background. When a program goes, the X server paints its frame
+  black where the client was, before i3 drops the frame, so a close animation would show an
+  empty frame. The plugin takes the background off each i3 frame it sees, so the X server
+  leaves the client's last picture there. i3 draws all of a frame itself and doesn't need it.
 - A window that moves while a cause is open gets that change renamed
   (`rename_trigger` from `geometry`). A rename starts nothing by itself: picom still decides whether
   the window moved, and whether that is held back. A window that opens, closes, shows or hides
@@ -183,6 +187,11 @@ if that window moves, so a focus change alone costs no wait.
 
 - A window that opens while its neighbours still move grows out of the line where i3 had
   them, not where they are drawn.
+- With a picom that matches a frame whose client went by the frame alone (the fork before
+  2026-11, and upstream), a rule that matches on the client (`window_type`,
+  `!override_redirect`) can miss a window that closes, if picom runs a pass between the
+  client going and i3 dropping the frame: an i3 frame is override-redirect. The window then
+  closes without its close animation. The fork keeps a window's rules until its frame goes.
 - Floating off has no cause: i3 removes `I3_FLOATING_WINDOW` after the move. It keeps `geometry`,
   unless `win-cause run` names it.
 - Resize, swap, move and layout changes show nothing beforehand. They keep `geometry`, unless
@@ -201,8 +210,9 @@ runs the tests, on X. They run the `i3` and `i3-msg` first on `PATH`.
 
 Runs real i3, xterm and picom on its own Xvfb, and checks in picom's log which trigger each
 action started, and in its frame timing log that the windows of a change start in one frame
-and the split line of each window that opens or closes. `WC_BACKEND=glx` and `WC_ROUNDS=n` change
-how.
+and the split line of each window that opens or closes; and on the
+screen, that a window whose program closes shows its last picture while it closes, not an
+empty frame. `WC_BACKEND=glx` and `WC_ROUNDS=n` change how.
 
 `tests/scene.py` runs a list of changes on Xvfb, with i3, picom and real or test programs,
 and keeps the marks and the frame log:

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Checks which trigger each real i3 action starts, from picom's own log, and from picom's
 frame timing log that the windows of one change start in one frame, and the split line the
-plugin gives the scripts of a window that opens or closes.
+plugin gives the scripts of a window that opens or closes. And from the screen, that a window
+that closes shows its last picture, not i3's empty frame.
 
 Needs PICOM, a picom with the plugin API that src/win_cause.h names. Runs on its own Xvfb.
 """
 
+import ctypes
 import json
 import os
 import re
@@ -154,6 +156,30 @@ def check(step, expected, quiet=(), together=()):
 	if together and len(frames) != 1:
 		failures.append(f"{step}: {', '.join(together)} started in frames {sorted(frames)}, "
 		                "wanted one")
+
+
+def screen_colour(x, y):
+	"""The colour at x, y of what picom shows, as 0xRRGGBB."""
+	x11 = ctypes.CDLL("libX11.so.6")
+	x11.XOpenDisplay.restype = ctypes.c_void_p
+	x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+	x11.XDefaultRootWindow.restype = ctypes.c_ulong
+	x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+	x11.XGetImage.restype = ctypes.c_void_p
+	x11.XGetImage.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int,
+	                          ctypes.c_uint, ctypes.c_uint, ctypes.c_ulong, ctypes.c_int]
+	x11.XGetPixel.restype = ctypes.c_ulong
+	x11.XGetPixel.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+	x11.XDestroyImage.argtypes = [ctypes.c_void_p]
+	x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+	display = x11.XOpenDisplay(DISPLAY.encode())
+	z_pixmap = 2
+	image = x11.XGetImage(display, x11.XDefaultRootWindow(display), x, y, 1, 1, 0xFFFFFFFF,
+	                      z_pixmap)
+	colour = x11.XGetPixel(image, 0, 0) & 0xFFFFFF
+	x11.XDestroyImage(image)
+	x11.XCloseDisplay(display)
+	return colour
 
 
 def overlap(a, b):
@@ -368,6 +394,32 @@ try:
 	c.wait()
 	check("close after a restart", {"a": {"moved-by-close"}, "b": {"moved-by-close"}})
 
+	# A window that closes shows its last picture: when its program goes, the X server
+	# paints i3's frame black where the client was, before i3 drops the frame, unless the
+	# plugin took the frame's background away. It closes in 3 s, drawn as it is
+	# (picom.conf), alone on its workspace, so no other window covers it. Three times, as
+	# the X server doesn't always get to paint the frame first.
+	checks += 1
+	i3("workspace 3")
+	for attempt in range(3):
+		keeps = subprocess.Popen(
+			["xterm", "-T", "keeps", "-bg", "#204060", "-xrm", "XTerm*allowTitleOps: false"],
+			env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+		wait_for(lambda: "keeps" in tree_windows(), "window keeps")
+		settle()
+		starts()
+		x, y, width, height = tree_windows("rect")["keeps"]
+		middle = (x + width // 2, y + height // 2)
+		shown = screen_colour(*middle)
+		keeps.terminate()
+		keeps.wait()
+		wait_for(lambda: "close" in starts().get("keeps", []), "the close of keeps")
+		closing = screen_colour(*middle)
+		if shown != 0x204060 or closing != shown:
+			failures.append(f"close {attempt + 1}: keeps shows {closing:#08x} at {middle} "
+			                f"while it closes, {shown:#08x} before; wanted 0x204060")
+		time.sleep(3)
+	i3("workspace 1")
 except AssertionError as error:
 	failures.append(str(error))
 finally:

@@ -98,6 +98,19 @@ static void wc_forget(xcb_window_t id) {
 	}
 }
 
+/// i3 gives its frames a black background, so when a client goes, the X server paints
+/// its frame black where the client was, before i3 drops the frame, and picom would draw
+/// that while the window closes. Without a background the X server leaves the client's
+/// last picture there. i3 draws all of a frame itself and doesn't need one.
+static void wc_keep_picture(xcb_window_t frame) {
+	const uint32_t none = XCB_BACK_PIXMAP_NONE;
+	auto cookie =
+	    xcb_change_window_attributes_checked(wc.c, frame, XCB_CW_BACK_PIXMAP, &none);
+	// The frame may be gone already; that is fine.
+	xcb_discard_reply(wc.c, cookie.sequence);
+	xcb_flush(wc.c);
+}
+
 static struct frame *wc_add_frame(xcb_window_t id, xcb_window_t client) {
 	wc_forget(id);
 	PUSH(wc.frames, wc.n_frames, ((struct frame){.id = id, .client = client}));
@@ -263,10 +276,17 @@ static void wc_read_frame(struct frame *frame) {
 	    xcb_get_property(wc.c, 0, frame->client, wc.a_state, XCB_ATOM_ATOM, 0, 32);
 	auto floating_read =
 	    xcb_get_property(wc.c, 0, frame->client, wc.a_floating, XCB_ATOM_ANY, 0, 1);
+	auto class_read =
+	    xcb_get_property(wc.c, 0, frame->id, XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, 0, 4);
 	auto geometry = xcb_get_geometry_reply(wc.c, geometry_read, NULL);
 	auto attributes = xcb_get_window_attributes_reply(wc.c, attributes_read, NULL);
 	auto state = xcb_get_property_reply(wc.c, state_read, NULL);
 	auto floating = xcb_get_property_reply(wc.c, floating_read, NULL);
+	auto class = xcb_get_property_reply(wc.c, class_read, NULL);
+	if (class != NULL && xcb_get_property_value_length(class) >= 9 &&
+	    memcmp(xcb_get_property_value(class), "i3-frame", 9) == 0) {
+		wc_keep_picture(frame->id);
+	}
 	if (geometry != NULL) {
 		frame->rect = wc_rect(geometry->x, geometry->y, geometry->width,
 		                      geometry->height, geometry->border_width);
@@ -280,6 +300,7 @@ static void wc_read_frame(struct frame *frame) {
 	free(attributes);
 	free(state);
 	free(floating);
+	free(class);
 }
 
 /// The windows that were there before we came. New ones come from the events.
@@ -311,10 +332,12 @@ static void wc_on_reparent(const xcb_reparent_notify_event_t *e) {
 			frame = wc_frame_of_client(client);
 			frame->id = e->parent;
 			frame->placed = frame->mapped = false;
+			wc_keep_picture(frame->id);
 		}
 		return;
 	}
 	if (e->event == wc.root && e->parent != wc.root) {
+		wc_keep_picture(e->parent);
 		auto token = wc_open_cause("moved-by-open", XCB_NONE, e->parent);
 		wc_add_frame(e->parent, e->window)->opened = token;
 		if (token != 0) {
