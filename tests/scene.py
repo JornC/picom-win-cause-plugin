@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Runs changes on a desktop of its own, and keeps what they did.
 
-A list of programs opens on Xvfb with i3, picom and the plugin, then each scene runs
+A list of programs opens on Xvfb with i3, picom and the tile style, then each scene runs
 once: real keys (xdotool), i3 commands, or programs that open and close. Into OUT goes:
 
   marks          M,monotonic us,scene, a line per scene, then one "end" line
@@ -10,7 +10,7 @@ once: real keys (xdotool), i3 commands, or programs that open and close. Into OU
   windows        client window, name, a line per window
 
 Usage: scene.py OUT --program NAME=KIND [--program ...] --scene ACTIONS [--scene ...]
-                [--name LABEL] [--size WxH] [--wait S] [--gaps PX] [--backend B]
+                [--name LABEL] [--size WxH] [--length S] [--wait S] [--gaps PX] [--backend B]
                 [--rounds N] [--config PATH] [--i3 LINE ...]
 
 KIND is xterm, wezterm, chrome, or slow:DELAY[:sync], which is tests/slowclient. ACTIONS is
@@ -24,9 +24,9 @@ a comma separated list of what a scene does, one at a time:
   exec:COMMAND   runs COMMAND with sh on the display, OUT in $SCENE_OUT, and waits for it
 
 --name gives a scene its label, in order; its actions by default. --config runs picom with
-that picom.conf instead of the plugin alone, as it is: picom finds what it includes and its
-plugins as usual (next to it, then XDG_CONFIG_HOME and XDG_CONFIG_DIRS). Each --i3 line
-goes at the end of i3's config. Needs PICOM. Holds
+that picom.conf instead of the tile style alone, as it is: picom finds what it includes
+and its plugins as usual (next to it, then XDG_CONFIG_HOME and XDG_CONFIG_DIRS), and
+--length doesn't apply. Each --i3 line goes at the end of i3's config. Needs PICOM. Holds
 the display in WC_DISPLAY, :97 by default, so run it where nothing else does.
 """
 
@@ -60,6 +60,13 @@ bindsym Mod1+f fullscreen toggle
 
 PICOM_CONFIG = """plugins = ["{plugin}"];
 vsync = true;
+rules = ({{
+  match = "!override_redirect && window_type = 'normal'";
+  @include "win-cause/tile.conf"
+}}, {{
+  match = "!override_redirect && window_type = 'normal' && !I3_FLOATING_WINDOW@";
+  @include "win-cause/tile-geometry.conf"
+}});
 """
 
 
@@ -187,7 +194,16 @@ class Scene:
             f.write("".join(f"{line}\n" for line in a.i3))
         config = a.config
         if config is None:
-            config = f"{self.work}/picom.conf"
+            conf = f"{self.work}/conf"
+            os.makedirs(conf)
+            shutil.copytree(f"{ROOT}/styles", f"{conf}/win-cause")
+            part = f"{conf}/win-cause/parts/tile.conf"
+            with open(part) as f:
+                text = re.sub(r"^var-length = .*;", f"var-length = {a.length};", f.read(),
+                              flags=re.M)
+            with open(part, "w") as f:
+                f.write(text)
+            config = f"{conf}/picom.conf"
             with open(config, "w") as f:
                 f.write(PICOM_CONFIG.format(plugin=f"{ROOT}/build/win-cause.so"))
         try:
@@ -237,6 +253,7 @@ def main():
     ap.add_argument("--scene", action="append", default=[])
     ap.add_argument("--name", action="append")
     ap.add_argument("--size", default="1920x1080")
+    ap.add_argument("--length", type=float, default=0.32)
     ap.add_argument("--wait", type=float, default=2.0)
     ap.add_argument("--settle", type=float, default=0.6, help="seconds after each program opens")
     ap.add_argument("--gaps", type=int, default=10)

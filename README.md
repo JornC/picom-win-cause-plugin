@@ -12,10 +12,10 @@ Needs plugin API 0.12 of the picom fork (`rename_trigger`, `add_x_event_callback
     make PICOM_API_CFLAGS=-I/path/to/picom/include
     make install
 
-That puts the plugin where picom finds it by name, and the command in `~/.local/bin`. Then
-load the plugin, and write a script for each cause you care about. A window with no script
-for a cause starts its usual `geometry` animation, so all of them are optional. The name
-says it: the window moved because of that.
+That puts the plugin and the styles where picom finds them by name, and the command in
+`~/.local/bin`. Then load the plugin, and write a script for each cause you care about. A
+window with no script for a cause starts its usual `geometry` animation, so all of them are
+optional. The name says it: the window moved because of that.
 
 | Trigger | Starts on |
 |---|---|
@@ -50,7 +50,9 @@ so they sit next to any other style, such as those of ws-direction:
 
 The window that becomes floating is floating by the time it moves, so `moved-by-float` must
 be in a rule that matches floating windows, like the first one here. The second leaves them
-out, so a mouse drag of a floating window isn't slowed down.
+out, so a mouse drag of a floating window isn't slowed down. A preset can't set
+`keep-stacking`, so with `geometry-change` a window i3 restacks while two pass each other
+can jump in front of the other; the tile style sets it.
 
 For what i3 doesn't show, a command says why. Any name works, as long as picom.conf declares
 it in `animation-triggers`:
@@ -66,6 +68,84 @@ takes, even if it moves nothing or gets killed.
 
 A style holds a move back by either name. `suppressions = ["geometry"]` holds back all moves,
 and `suppressions = ["moved-by-close"]` only those.
+
+## Style: tile
+
+`styles/tile.conf` moves windows as rectangles, for every cause, so a change looks like
+what i3 does:
+
+    plugins = ["win-cause.so"];
+    rules = ({
+      match = "!override_redirect && window_type = 'normal'";
+      @include "win-cause/tile.conf"
+    }, {
+      match = "!override_redirect && window_type = 'normal' && !I3_FLOATING_WINDOW@";
+      @include "win-cause/tile-geometry.conf"
+    });
+
+The first rule has the causes, `open` and `close`, for all windows, as a window that turns
+floating is floating by the time it moves. The second has the same motion for `geometry`
+(resize, swap, move, layout, floating off), but not for floating windows, so a mouse drag
+isn't slowed. It needs a picom with `window-image-width`, `fill`, `window-edge-red`,
+`frame-on-crop`, `saved-image-own-size` and `keep-stacking`.
+
+- Each window of a change has a rectangle that goes from where the window was to where it
+  is. All of them move on one curve, at one time, and start and end without speed. An edge
+  that two windows share stays shared, so the gap a window leaves closes as it goes, and
+  nothing overlaps. With `var-path` 1, windows that trade places bend around each other
+  instead; an edge that a window shares with a neighbour where the change starts and
+  where it ends goes straight, so tiles that stay neighbours stay together.
+- i3's frame (the border, or the title bar), as i3 last drew it in the picture picom has,
+  is drawn on the rectangle's edges in every frame: never scaled across it, as long as the
+  side along it, and a title moves along with the content.
+- The content inside the frame is never scaled or blended. It is drawn at its own size, cut where it is larger than the inside of the
+  frame, and the part that it doesn't cover is filled with the colour of the
+  picture's edge (the ring just inside i3's frame). picom keeps the picture a window had
+  when the change started, and takes up each newer one as the program draws it (until the
+  program has drawn at its new size, the newest is the last). In each frame the one that
+  covers more of the rectangle is drawn, switching in one frame: a window that grows
+  shows its newest picture as soon as the program has drawn it, one that shrinks keeps
+  its larger old picture, cut by the rectangle, until it lands, and a window whose split
+  turns from side by side to one above the other shows the old tall picture or the new
+  wide one, whichever fills more, so the fill covers only what neither does.
+- A window that opens grows out of the line it split from (see [Variables](#variables)),
+  its picture standing at its place and showing as the rectangle uncovers it, while its
+  neighbours make room on the same curve. A window that closes goes
+  back into its line: its picture stays where it was, and its rectangle is cut where the
+  windows that take its place reach, in every frame, also when windows next to it close
+  with it. So no part of its place shows what lies behind. One that shares no line with its
+  neighbours goes into its far side, away from them. One with no line at all (the first or
+  last on its workspace, a floating one, a new tab) keeps its own rectangle and fades in or
+  out (`var-lone-fade`).
+- A change that comes while one runs goes on from where every rectangle and picture is,
+  with the speed it has. i3 restacks the windows it moves, but no window comes in front
+  of a moving window that it overlaps until they are apart or the move ends: none jumps on
+  top of another while they pass (picom's `keep-stacking`). So a raise that i3 means, such
+  as a floating window over a window that turns tiled, shows once they are apart or the
+  move ends.
+
+The choices are in `styles/parts/tile.conf`. To change them, copy it to `win-cause/parts/`
+next to your `picom.conf`: picom looks there first, and `make install` doesn't write there.
+Save `picom.conf` once after that, so picom reads the copy.
+
+| Variable | Default | What it chooses |
+|---|---|---|
+| `var-length` | 0.25 | how long a change takes, in seconds |
+| `var-ease` | `cubic-bezier(0.42, 0, 0.58, 1)` | the curve; one that starts and ends without speed keeps the motion smooth where changes meet |
+| `var-path` | 0 | the way a rectangle goes in a change of i3's layout (a swap, a move, a split that turns): 0 straight; 1 curved around where its old and new places overlap, so two windows that trade places pass each other and shrink a little on the way, or bent to the left of its way where they don't (one going right goes up); an undo goes back the way it came. Windows that make room for one that opens or take the place of one that closes go straight |
+| `var-lift` | 0.08 | with `var-path` 1, how far off its way a window whose places don't overlap goes midway, as a share of its size across the way |
+| `var-interrupt` | 1 | a change that comes while one runs: 1 keeps each rectangle's speed and slows it to rest at its new place, 0 starts the curve again from where it is |
+| `var-fill` | 1 | how much of the gap is filled with the colour of the picture's edge: 1 all, 0 none, so what lies behind shows |
+| `var-anchor-x`, `var-anchor-y` | the still point | where a picture that doesn't fit sits in its rectangle: 0 at the left (top) edge, 1 at the right (bottom), 0.5 in the middle; by default the point of the window that stays still in the change (`var-still-x`, `var-still-y`), so no edge of the picture goes back while the program catches up |
+| `var-lone-fade` | 1 | a window that opens or closes without a split line fades in or out: 1 yes, 0 no |
+| `var-far-line` | 1 | a window that shares no split line with its neighbours: 1 goes into its far side as into a line, 0 goes as one with no line (`var-lone-fade`) |
+| `var-picture` | whichever covers more | which picture of a moving window is drawn: 1 the one it had when the change started, 0 its newest, as soon as the program has drawn it; by default (`var-picture-best`), in each frame, the one that covers more of the rectangle, each at its own size from its anchor |
+
+The rest of `styles/parts/` is the motion itself: `tile-rect.conf` for a window that moves,
+`tile-open.conf` and `tile-close.conf`, and what they share in `tile-shared.conf`. Nobody needs to
+copy them. Without `make install`, copy `styles/parts/` to
+`win-cause/parts/` next to `picom.conf`, as picom looks for included files from there, not
+next to the style.
 
 ## Variables
 
@@ -84,8 +164,8 @@ Like all plugin variables, they are read once, when the animation starts. A wind
 line (the first on its workspace, the last to close, a floating window, a new tab, a window
 that opens fullscreen) has `plugin-win-cause-line` 0 and its own rect, as does any other
 trigger; a window that i3 doesn't manage has 0 for all of them. So read the rects only where
-the line is 1. A style can treat the two kinds of line alike, or a far side
-otherwise.
+the line is 1. A style can treat the two kinds of line alike, as tile does, or a far side
+otherwise (tile's `var-far-line`).
 
 The neighbours are the tiled windows that overlap the window: for an open, where they were
 before i3 moved them for it, and for a close, where i3 moved them. A window that closes is
@@ -218,15 +298,30 @@ if that window moves, so a focus change alone costs no wait.
 
 ## Test
 
-    PICOM=/path/to/picom make check-harness
+    WS_DIRECTION=/path/to/ws-direction make check
 
-runs the tests, on X. They run the `i3` and `i3-msg` first on `PATH`.
+runs the tests that need no X server: `tests/check-tile.py` on made-up logs.
+
+    PICOM=/path/to/picom WS_DIRECTION=/path/to/ws-direction make check-harness
+
+runs the rest, on X; `make check-all` runs both. Both are needed. `WS_DIRECTION` is the root
+of a built ws-direction tree. The tests run the `i3` and `i3-msg` first on `PATH`.
 
 Runs real i3, xterm and picom on its own Xvfb, and checks in picom's log which trigger each
 action started, and in its frame timing log that the windows of a change start in one frame
 and the split line of each window that opens or closes, also after i3 restarts; and on the
 screen, that a window whose program closes shows its last picture while it closes, not an
 empty frame. `WC_BACKEND=glx` and `WC_ROUNDS=n` change how.
+`tests/tile.py` checks the tile style, with `tests/check-tile.py` on what picom drew in each
+part. A window that shares no line with its neighbours goes into its far side: two that
+close at once (picom stopped while they close, so it reads both in one pass), one left of a
+column of two, one that opens and closes right of it; the last ones on a workspace have no
+line. Two windows swapped and swapped back while they overlap keep the one in front in
+front, and so does a floating window that turns tiled under another. Two windows that trade
+places above a bar have no side on a seam: a dock is no tile. With a length of 1 s, a change
+that comes at 0.3, 0.5 and 0.7 of the one before (floating on then off, two resizes, an open
+then a close, two opens) makes no rectangle or picture jump. `WC_ONLY=far,stacking,dock,interrupt`
+runs only those parts.
 
 `tests/scene.py` runs a list of changes on Xvfb, with i3, picom and real or test programs,
 and keeps the marks and the frame log:
@@ -238,3 +333,12 @@ and keeps the marks and the frame log:
 next to it, then in `XDG_CONFIG_HOME` and `XDG_CONFIG_DIRS`), `--i3` adds a line to i3's
 config, and a scene's `exec:` action runs a command on the display, with the output
 directory in `$SCENE_OUT`.
+
+`tests/check-tile.py` checks what the tile style drew, from picom's frame timing log with the
+layout records (`PICOM_DEBUG="frame_timing=<path>;frame_layout=1"`): that no rectangle or
+picture jumps, every rectangle comes to rest without speed, no picture is scaled or blended,
+the windows of a change start in one frame and move on one clock, the edges they share stay
+shared, a window that opens or closes does so on its line, no part of a closing window's
+place shows what lies behind, and the gap is filled as the script asks. It uses ws-direction's `tests/check-frames.py` for the motion:
+
+    WS_DIRECTION=/path/to/ws-direction tests/check-tile.py frames.csv --monitor 0,0,1920,1080

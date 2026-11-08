@@ -28,28 +28,43 @@ build/slowclient: tests/slowclient.c
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/slowclient.c $(LDLIBS) \
 		$(shell $(PKG_CONFIG) --libs xcb-sync)
 
-# The tests that need no X server: what a package's check step runs.
+# The tests that need no X server: what a package's check step runs. WS_DIRECTION is the
+# root of a ws-direction tree, whose tests/check-frames.py the tile checker builds on.
 check: all
+	$(if $(WS_DIRECTION),,$(error make check needs WS_DIRECTION))
+	tests/check_tile_test.py
 
-# Runs real i3, xterm and picom on its own Xvfb. PICOM is a picom with the API above.
+# Runs real i3, xterm and picom on its own Xvfb. PICOM is a picom with the API above,
+# WS_DIRECTION the root of a built ws-direction tree.
 check-harness: all
+	$(if $(WS_DIRECTION),,$(error make check-harness needs WS_DIRECTION))
 	tests/run.py
+	tests/tile.py
 
 check-all: check check-harness
 
-# As ws-direction installs: the plugin where picom finds it by name, and the command under
-# PREFIX. A package sets DESTDIR, PREFIX=/usr, and PLUGINDIR to picom's plugin directory.
+# As ws-direction installs: the plugin and the styles where picom finds them by name (with
+# the parts they include in styles/parts), and the command under PREFIX. A package sets DESTDIR, PREFIX=/usr, STYLEDIR, and PLUGINDIR to
+# picom's plugin directory.
 PICOM_CONFIG_DIR ?= $(or $(XDG_CONFIG_HOME),$(HOME)/.config)/picom
 PLUGINDIR ?= $(PICOM_CONFIG_DIR)/plugins
+STYLEDIR ?= $(PICOM_CONFIG_DIR)/include/win-cause
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
+STYLES = $(notdir $(wildcard styles/*.conf))
+PARTS = $(notdir $(wildcard styles/parts/*.conf))
 
 install: all
 	install -Dm755 build/win-cause.so $(DESTDIR)$(PLUGINDIR)/win-cause.so
+	install -Dm644 -t $(DESTDIR)$(STYLEDIR) $(addprefix styles/,$(STYLES))
+	install -Dm644 -t $(DESTDIR)$(STYLEDIR)/parts $(addprefix styles/parts/,$(PARTS))
 	install -Dm755 build/win-cause $(DESTDIR)$(BINDIR)/win-cause
 
 uninstall:
-	rm -f $(DESTDIR)$(PLUGINDIR)/win-cause.so $(DESTDIR)$(BINDIR)/win-cause
+	rm -f $(DESTDIR)$(PLUGINDIR)/win-cause.so $(DESTDIR)$(BINDIR)/win-cause \
+		$(addprefix $(DESTDIR)$(STYLEDIR)/,$(STYLES)) \
+		$(addprefix $(DESTDIR)$(STYLEDIR)/parts/,$(PARTS))
+	rmdir --ignore-fail-on-non-empty $(DESTDIR)$(STYLEDIR)/parts $(DESTDIR)$(STYLEDIR)
 
 clean:
 	rm -rf build
