@@ -41,6 +41,7 @@ check-harness: all
 	$(if $(WS_DIRECTION),,$(error make check-harness needs WS_DIRECTION))
 	tests/run.py
 	tests/tile.py
+	tests/with_ws_direction.py
 	tests/drawn.py
 
 check-all: check check-harness

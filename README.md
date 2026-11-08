@@ -338,7 +338,8 @@ Runs real i3, xterm and picom on its own Xvfb, and checks in picom's log which t
 action started, and in its frame timing log that the windows of a change start in one frame
 and the split line of each window that opens or closes, also after i3 restarts; and on the
 screen, that a window whose program closes shows its last picture while it closes, not an
-empty frame. `WC_BACKEND=glx` and `WC_ROUNDS=n` change how.
+empty frame. It also checks the two plugins together, in both load orders. `WC_BACKEND=glx`
+and `WC_ROUNDS=n` change how.
 `tests/tile.py` checks the tile style, with `tests/check-tile.py` on what picom drew in each
 part. A window that shares no line with its neighbours goes into its far side: two that
 close at once (picom stopped while they close, so it reads both in one pass), one left of a
@@ -352,6 +353,8 @@ empty (`tests/slowclient` with `argb`) has the backdrop in the colour of the las
 its program, and for a new program in the style's; a window at half
 alpha has its backdrop at that alpha, and a translucent window's backdrop fades in and out
 as it moves. `WC_ONLY=far,stacking,dock,interrupt,backdrop` runs only those parts.
+`tests/with_ws_direction.py` runs with plain scripts and with the tile style: a change while
+the overview shows, and a workspace switch and an overview that come during a change.
 `tests/drawn.py` checks when the tile style trades a window's old picture for its newest:
 `tests/slowclient` windows get a new size and draw it at different times. The newest
 picture comes as soon as the program drew it, and reads of the screen show, inside each
