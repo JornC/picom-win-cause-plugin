@@ -1,0 +1,35 @@
+# How the files are written: C as in .clang-format, the shell scripts and the Makefile
+# with tabs, Python with four spaces, the picom styles and YAML with two.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{c,h}]
+indent_style = tab
+indent_size = 8
+tab_width = 8
+max_line_length = 90
+
+[{*.sh,Makefile}]
+indent_style = tab
+indent_size = 8
+tab_width = 8
+
+[*.py]
+indent_style = space
+indent_size = 4
+
+[*.{conf,yml}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+indent_style = space
+
+# The license text as published.
+[LICENSE]
+trim_trailing_whitespace = false
