@@ -51,6 +51,17 @@
 #            closing ones leave it, and nothing behind shows
 #   fill     where the picture doesn't cover the rectangle, picom fills what the script
 #            asks: the I record's fill and colour are the E record's
+#   unfilled where the picture doesn't cover the rectangle of a script that fills
+#            (var-fill above 0), the fill is drawn: never left at 0 because the window's
+#            colour isn't known, which shows what lies behind. Two kinds are only counted:
+#            a picture with nothing inside its frame (no colour to know yet), and the first
+#            two frames after a window's first picture with something in it (picom works
+#            the colour out in a frame or so, without waiting for it)
+#   opacity  a tile script draws the window at the opacity it has at rest, so a
+#            translucent window stays as translucent and doesn't jump when the animation
+#            ends: one that doesn't set opacity keeps the window's opacity in every frame,
+#            and where an animation ends on a drawn window, the window's opacity in the
+#            next frame is the one in its last
 #   frame    the window manager's frame is on the rectangle's edges in every frame of a
 #            tile script: the script sets frame-on-crop, and the I record has the frame
 #            that picom drew there (all 0 for a window without a frame)
@@ -68,6 +79,11 @@
 #   retrace  a change that undoes one it interrupts (it ends where that one started) goes
 #            back on the side of that one's straight way that the window is on, within
 #            1 px
+#   backdrop the backdrop under a window's rectangle (U records), times the window's
+#            opacity, changes no faster than from 0 to 1 in 30 ms between two frames in
+#            which the window is drawn: it fades in and out, so a translucent window
+#            doesn't jump when the backdrop comes or goes. A window that wasn't drawn the
+#            frame before may come with it
 #   stacking no window comes in front of a window in a tile animation that it overlaps: of
 #            two windows drawn in two frames in a row, whose drawn boxes overlap in both,
 #            the one in front in the first frame is in front in the second too if it is in
@@ -98,8 +114,11 @@ E_ROUND = 1e-6
 # A rectangle's edges are worked out from E values: 6 digits of numbers up to a few
 # thousand pixels.
 EDGE_ROUND = 0.01
-# The I record writes the fill with 4 decimals.
+# The I record writes the fill with 4 decimals, and the W record the opacity.
 FILL_ROUND = 0.5e-4 + E_ROUND
+ROUND_OPACITY = 1e-4
+# The shortest a window's backdrop, times its opacity, takes from 0 to 1: a quicker one jumps.
+BACKDROP_FADE = 0.03
 # How far a rectangle may be from the way the style's shape puts it: E values of a few
 # thousand pixels to 6 digits, a dozen of them in the sum.
 PATH_ROUND = 0.1
@@ -193,11 +212,14 @@ def parse_extra(path):
     """The I records, {frame: {window: [x, y, width, height, image_width, image_height,
     fill, fill_red, fill_green, fill_blue]}}, the frame on the crop box from them,
     {frame: {window: (left, right, top, bottom)}}, which picture they draw and the saved
-    one's size, {frame: {window: (drawn, saved_width, saved_height)}}, the Z records,
-    {frame: [window]}, and the A records with the frame that has their first pose:
-    [(frame, window, trigger, time)]."""
+    one's size, {frame: {window: (drawn, saved_width, saved_height)}}, the U records,
+    {frame: {window: (backdrop, red, green, blue)}}, the Z records, {frame: [window]}, and
+    the A records with the frame that has their first pose: [(frame, window, trigger,
+    time)]."""
     pictures = defaultdict(dict)
+    backdrops = defaultdict(dict)
     frames_on_crop = defaultdict(dict)
+    contents = defaultdict(dict)
     drawn = defaultdict(dict)
     orders = {}
     starts, pending = [], []
@@ -213,9 +235,13 @@ def parse_extra(path):
                 pictures[int(p[1])][p[2]] = values + [None] * (10 - len(values))
                 if len(p) >= 17:
                     frames_on_crop[int(p[1])][p[2]] = tuple(int(v) for v in p[13:17])
+                if len(p) >= 23:
+                    contents[int(p[1])][p[2]] = tuple(int(v) for v in p[19:23])
                 # Which picture is drawn came after the frame; without it, the image.
                 if len(p) >= 26:
                     drawn[int(p[1])][p[2]] = (p[23], int(p[24]), int(p[25]))
+            elif p[0] == "U":
+                backdrops[int(p[1])][p[2]] = tuple(float(v) for v in p[3:7])
             elif p[0] == "Z":
                 orders[int(p[1])] = p[2:]
             elif p[0] == "A":
@@ -223,7 +249,7 @@ def parse_extra(path):
             elif p[0] == "R":
                 starts += [(int(p[1]), w, trigger, t) for w, trigger, t in pending]
                 pending = []
-    return pictures, frames_on_crop, drawn, orders, starts
+    return pictures, frames_on_crop, contents, drawn, backdrops, orders, starts
 
 
 class TileCheck:
@@ -231,8 +257,8 @@ class TileCheck:
         self.cf = cf
         self.cover_gap = cover_gap
         self.parsed = cf.parse(path)
-        (self.pictures, self.frames_on_crop, self.drawn, self.orders,
-         self.a_records) = parse_extra(path)
+        (self.pictures, self.frames_on_crop, self.contents, self.drawn, self.backdrops,
+         self.orders, self.a_records) = parse_extra(path)
         self.monitors, self.start, self.change_gap = monitors, start, change_gap
         _, self.frames, _ = self.parsed
         self.base = cf.Checker(*self.parsed, monitors, start)
@@ -392,9 +418,34 @@ class TileCheck:
                 if tile(layer.script):
                     yield n, w, layer
 
+    def has_content(self, n, w):
+        """Whether the picture a window is drawn from in frame n has anything inside the
+        frame around its content."""
+        pic = self.pictures.get(n, {}).get(w)
+        if pic is None or pic[4] is None:
+            return False
+        width, height = pic[4], pic[5]
+        drawn = self.drawn.get(n, {}).get(w)
+        if drawn is not None and drawn[0] == "saved":
+            width, height = drawn[1], drawn[2]
+        left, right, top, bottom = self.contents.get(n, {}).get(w, (0, 0, 0, 0))
+        return width - left - right > 0 and height - top - bottom > 0
+
+    def first_content(self):
+        """{window: the index in self.order of the first frame in which its picture has
+        something inside its frame}."""
+        first = {}
+        for k, n in enumerate(self.order):
+            for w, layer in self.frames[n].items():
+                if w not in first and layer.state == "D" and self.has_content(n, w):
+                    first[w] = k
+        return first
+
     def check_scale_blend_fill(self):
         scaled = blended = filled = 0
-        missing = unfilled = 0
+        missing = unfilled = gaps_to_fill = no_picture = coming = 0
+        first = self.first_content()
+        index = {n: k for k, n in enumerate(self.order)}
         colours = defaultdict(set)
         for n, w, layer in self.tile_layers():
             s = layer.script
@@ -432,6 +483,15 @@ class TileCheck:
                 unfilled += 1
                 continue
             filled += 1
+            if s.get("var-fill", 0) > 0:
+                gaps_to_fill += 1
+                if fill <= 0 and not self.has_content(n, w):
+                    no_picture += 1
+                elif fill <= 0 and index[n] - first.get(w, index[n]) <= 2:
+                    coming += 1
+                elif fill <= 0:
+                    self.fail("unfilled", n, w, "the rectangle has a gap, and its fill is 0: "
+                              "what lies behind shows")
             asked = (s.get("fill", 0), s.get("fill-red", 0), s.get("fill-green", 0),
                      s.get("fill-blue", 0))
             got = (fill, red, green, blue)
@@ -447,6 +507,9 @@ class TileCheck:
                 f"{missing} drawn frames of tile scripts have no I record; does this picom "
                 "write the picture records?")
         self.notes["fill"] = f"{filled} rectangles with a gap"
+        self.notes["unfilled"] = (f"{gaps_to_fill} rectangles with a gap to fill, {no_picture} "
+                                  f"of a picture with nothing in it, {coming} in the first two "
+                                  "frames of a window's first picture")
         self.fill_colours = colours
         if unfilled:
             self.failures["fill"].append(
@@ -877,6 +940,65 @@ class TileCheck:
                     break
         self.notes["retrace"] = f"{count} undos off the straight way"
 
+    def check_opacity(self):
+        kept = ended = 0
+        last = {}
+        for n in sorted(self.frames):
+            for w, layer in self.frames[n].items():
+                s = layer.script
+                before = last.get(w)
+                last[w] = (n, layer)
+                if tile(s) and "opacity" not in s and s["elapsed"] < s["duration"]:
+                    rest = self.rest_opacity(n, w)
+                    kept += 1
+                    if rest is not None and abs(layer.opacity - rest) > ROUND_OPACITY:
+                        self.fail("opacity", n, w, f"drawn at opacity {layer.opacity:g}, and "
+                                  f"{rest:g} once the animation ends")
+                if before is None or layer.state != "D" or tile(s):
+                    continue
+                m, prev = before
+                if prev.state == "D" and tile(prev.script):
+                    ended += 1
+                    if abs(layer.opacity - prev.opacity) > ROUND_OPACITY:
+                        self.fail("opacity", n, w, f"its opacity jumps from {prev.opacity:g} "
+                                  f"in the animation's last frame to {layer.opacity:g}")
+        self.notes["opacity"] = (f"{kept} frames of scripts that keep the window's opacity, "
+                                 f"{ended} animations that end on a drawn window")
+
+    def rest_opacity(self, n0, w):
+        """The window's opacity in the first frame after n0 in which it is drawn with no
+        tile script, None if there is none."""
+        if not hasattr(self, "_rest"):
+            self._rest = {}
+            following = {}
+            for n in sorted(self.frames, reverse=True):
+                for v, layer in self.frames[n].items():
+                    if layer.state == "D" and not tile(layer.script):
+                        following[v] = layer.opacity
+                    self._rest[(n, v)] = following.get(v)
+        return self._rest.get((n0, w))
+
+    def check_backdrop(self):
+        count = 0
+        last, m = {}, None
+        for n in sorted(self.frames):
+            shown = {}
+            for w, layer in self.frames[n].items():
+                if layer.state != "D":
+                    continue
+                backdrop = self.backdrops.get(n, {}).get(w, (0,))[0] * layer.opacity
+                shown[w] = backdrop
+                count += backdrop > 0
+                before = last.get(w)
+                if before is None:
+                    continue
+                most = (self.base.starts[n] - self.base.starts[m]) / BACKDROP_FADE
+                if abs(backdrop - before) > most + E_ROUND:
+                    self.fail("backdrop", n, w, f"its backdrop jumps from {before:.2f} to "
+                              f"{backdrop:.2f}, times its opacity, {most:.2f} allowed")
+            last, m = shown, n
+        self.notes["backdrop"] = f"{count} frames of windows with a backdrop"
+
     def drawn_box(self, layer):
         """A box around what is drawn of a layer, in the whole pixels picom rounds its
         edges to: a tile animation's rectangle, as its frame is on it, else its corners cut
@@ -930,6 +1052,7 @@ class TileCheck:
         self.check_motion()
         self.check_edges()
         self.check_scale_blend_fill()
+        self.check_opacity()
         self.check_frame()
         self.check_clock()
         self.check_seams()
@@ -938,11 +1061,12 @@ class TileCheck:
         self.check_box()
         self.check_path()
         self.check_retrace()
+        self.check_backdrop()
         self.check_stacking()
         ok = True
         for check in ("rect", "pops", "stops", "drawn", "picture", "edges", "scale", "blend", "clock",
-                      "seams", "line", "cover", "fill", "frame", "box",
-                      "path", "retrace", "stacking",
+                      "seams", "line", "cover", "fill", "unfilled", "opacity", "frame", "box",
+                      "path", "retrace", "backdrop", "stacking",
                       "rest"):
             fails = self.failures.get(check, [])
             ok = ok and not fails

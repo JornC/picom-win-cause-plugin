@@ -6,7 +6,9 @@
 # left of them takes both places: cut where it reaches, which passes, and the far one
 # shrinking on its own, which leaves part of its place showing what lies behind. An
 # animation that takes over with another anchor, its picture staying where it is, passes.
-# Two windows that swap places, one raised halfway: drawn on top at once fails, kept under
+# A gap left unfilled fails, and so does a translucent window drawn more opaque in its
+# animation than after it. A translucent window's backdrop that fades in and out passes, and one that goes at once fails. Two
+# windows that swap places, one raised halfway: drawn on top at once fails, kept under
 # while they overlap passes, and a window in a tile animation may come in front of one in
 # none. One that comes in front of a tile as the tile's animation ends is named. The
 # style's curved way (var-path 1): two windows that go from side by side to one above the
@@ -84,7 +86,8 @@ class Log:
             crop = d.get("crop", (math.inf,) * 4)
             fields = ["W", self.frame, w, "D", x, y, bw, bh]
             fields += [f"{v:.2f}" for c in corners for v in c]
-            fields += ["1.0000"] + [f"{v:.2f}" if math.isfinite(v) else "inf" for v in crop]
+            fields += [f"{d.get('opacity', 1):.4f}"]
+            fields += [f"{v:.2f}" if math.isfinite(v) else "inf" for v in crop]
             self.lines.append(",".join(str(f) for f in fields))
             s = d.get("script")
             if s is not None:
@@ -96,6 +99,8 @@ class Log:
                 frame = [4] * 4 if s.get("frame-on-crop", 0) > 0.5 else [0] * 4
                 self.lines.append(",".join(str(v) for v in ["I", self.frame, w, px, py, pw,
                                                             ph, iw, ih] + fill + frame))
+                if s.get("backdrop", 0) > 0:
+                    self.lines.append(f"U,{self.frame},{w},{s['backdrop']:g},0.1,0.1,0.1")
         if order is not None:
             self.lines.append(f"Z,{self.frame}," + ",".join(order))
         us = round(t * 1e6)
@@ -245,6 +250,42 @@ def close_scene(hole=False, stays=False):
     return log
 
 
+def follow_scene(lag=0.0, fill=1, opacity=1.0, rest_opacity=None):
+    """A window whose rectangle grows from 400 to 800 px wide, its real size following
+    every 0.05 s, ahead of the rectangle, or `lag` s behind it. Its picture is its real
+    size, and the rest of the rectangle is filled by `fill`. It is drawn at `opacity` in
+    the animation, and at `rest_opacity` (`opacity` by default) after it."""
+    rest_opacity = opacity if rest_opacity is None else rest_opacity
+    log = Log()
+    hz = 100
+    t0 = 1.0
+    times = [t0 + i / hz for i in range(int(0.3 * hz))]
+    for t in times:
+        e = t - t0
+        if e >= LENGTH:
+            log.add(t, {A: {"box": (0, 0, 800, 800), "opacity": rest_opacity}})
+            continue
+        ease = EASE(e / LENGTH)
+        rw = 400 + 400 * ease
+        step = math.floor(e / 0.05) * 0.05
+        real = 400 + 400 * EASE(min(1.0, max(0.0, step + 0.05 - lag) / LENGTH))
+        real = round(real)
+        if e >= LENGTH - 0.05:
+            real = 800
+        s = {"elapsed": e, "duration": LENGTH, "var-on": 1, "var-carried": 0,
+             "var-anchor-x": 0, "var-anchor-y": 0, "var-ease": ease, "var-x0": 0, "var-y0": 0,
+             "var-w0": 400, "var-h0": 800, "var-x1": 0, "var-y1": 0, "var-w1": 800,
+             "var-h1": 800, "scale-x": 1, "scale-y": 1, "offset-x": 0, "offset-y": 0,
+             "crop-x": 0, "crop-y": 0, "crop-width": rw, "crop-height": 800, "var-fill": 1,
+             "fill": fill, "fill-red": 0.2, "fill-green": 0.2, "fill-blue": 0.2, "var-ax": 0,
+             "var-ay": 0, "frame-on-crop": 1}
+        log.add(t, {A: {"box": (0, 0, real, 800), "picture": (0, 0, real, 800),
+                        "image": (real, 800), "crop": (0, 0, rw, 800), "script": s,
+                        "opacity": opacity}},
+                [(A, "size")] if e == 0 else ())
+    return log
+
+
 def anchor_scene():
     """A window of 400 px whose rectangle grows from its middle at anchor 0.5, its picture
     standing still; halfway an animation takes over with anchor 1, from where the picture
@@ -278,6 +319,36 @@ def anchor_scene():
                     handover=(A, script(i / hz, 0.5, rx, rw)))
         else:
             log.add(t, windows(script((i - middle) / hz, 1, rx, rw), rx, rw))
+    return log
+
+
+def backdrop_scene(fade=True, opacity=0.6):
+    """A translucent window that moves right by 100 px on the style's curve, with a
+    backdrop that fades in over the first quarter of the animation and out over the last,
+    or that is there in every frame of it and goes at once when it ends."""
+    log = Log()
+    hz = 175
+    t0 = 1.0
+    n = int(LENGTH * hz)
+    for i in range(-5, n + 10):
+        t = t0 + i / hz
+        if 0 <= i < n:
+            q = i / n
+            ease = EASE(q)
+            rx = 100 * ease
+            s = {"elapsed": q * LENGTH, "duration": LENGTH, "var-on": 1, "var-anchor-x": 0,
+                 "var-anchor-y": 0, "var-ease": ease, "var-x0": 0, "var-y0": 0,
+                 "var-w0": 400, "var-h0": 300, "var-x1": 100, "var-y1": 0, "var-w1": 400,
+                 "var-h1": 300, "var-ax": rx, "var-ay": 0,
+                 "crop-x": rx, "crop-y": 0, "crop-width": 400, "crop-height": 300,
+                 "frame-on-crop": 1,
+                 "backdrop": min(1, q / 0.25, (1 - q) / 0.25) if fade else 1}
+            windows = {A: {"box": (100, 0, 400, 300), "picture": (rx, 0, 400, 300),
+                           "script": s, "crop": (rx, 0, 400, 300), "opacity": opacity}}
+            log.add(t, windows, [(A, "position")] if i == 0 else ())
+        else:
+            x = 0 if i < 0 else 100
+            log.add(t, {A: {"box": (x, 0, 400, 300), "opacity": opacity}})
     return log
 
 
@@ -489,6 +560,27 @@ class TileCheckTest(unittest.TestCase):
         ok, failed, out = self.failed(scene(b_draws="still"))
         self.assertTrue(ok, out)
 
+    def test_unfilled(self):
+        ok, failed, out = self.failed(follow_scene(lag=0.1))
+        self.assertNotIn("unfilled", failed, out)
+        self.assertRegex(out, r"ok  unfilled: [1-9]\d* rectangles with a gap to fill")
+        ok, failed, out = self.failed(follow_scene(lag=0.1, fill=0))
+        self.assertIn("unfilled", failed, out)
+        self.assertNotIn("fill", failed, out)
+
+    def test_translucent(self):
+        ok, failed, out = self.failed(follow_scene(lag=0.1, opacity=0.5, fill=0.7))
+        self.assertNotIn("opacity", failed, out)
+        self.assertIn("ok  opacity", out)
+        ok, failed, out = self.failed(follow_scene(lag=0.1, opacity=1, rest_opacity=0.5))
+        self.assertIn("opacity", failed, out)
+
+    def test_backdrop(self):
+        ok, failed, out = self.failed(backdrop_scene())
+        self.assertNotIn("backdrop", failed, out)
+        self.assertRegex(out, r"ok  backdrop: [1-9]\d* frames")
+        ok, failed, out = self.failed(backdrop_scene(fade=False))
+        self.assertIn("backdrop", failed, out)
 
     def test_anchor_at_a_handover(self):
         ok, failed, out = self.failed(anchor_scene())

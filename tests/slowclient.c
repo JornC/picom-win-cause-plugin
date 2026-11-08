@@ -13,7 +13,12 @@
 // A delay of A/B takes A ms and B ms in turn, frame by frame: a program whose draw time
 // falls and rises.
 //
-// Usage: slowclient TITLE DELAY|A/B|never [sync|partial]
+// With "argb" it has a visual with alpha and a transparent background, and draws its first
+// frame DELAY ms after it is mapped too: its first picture is empty for that long, as
+// wezterm's and Chrome's are. It draws at an alpha of $SLOWCLIENT_ALPHA (0 to 255), or
+// opaque. The class in WM_CLASS is $SLOWCLIENT_CLASS, or slowclient.
+//
+// Usage: slowclient TITLE DELAY|A/B|never [sync|partial|argb]
 
 #include <poll.h>
 #include <stdio.h>
@@ -41,7 +46,7 @@ static double now_ms(void) {
 
 int main(int argc, char **argv) {
 	if (argc < 3) {
-		fputs("usage: slowclient TITLE DELAY|A/B|never [sync|partial]\n", stderr);
+		fputs("usage: slowclient TITLE DELAY|A/B|never [sync|partial|argb]\n", stderr);
 		return 2;
 	}
 	bool never = strcmp(argv[2], "never") == 0;
@@ -52,6 +57,7 @@ int main(int argc, char **argv) {
 	unsigned frames = 0;
 	bool sync = argc > 3 && strcmp(argv[3], "sync") == 0;
 	bool partial = argc > 3 && strcmp(argv[3], "partial") == 0;
+	bool argb = argc > 3 && strcmp(argv[3], "argb") == 0;
 
 	xcb_connection_t *c = xcb_connect(NULL, NULL);
 	if (xcb_connection_has_error(c)) {
@@ -60,13 +66,43 @@ int main(int argc, char **argv) {
 	}
 	xcb_screen_t *screen = xcb_setup_roots_iterator(xcb_get_setup(c)).data;
 	xcb_window_t w = xcb_generate_id(c);
-	const uint32_t values[] = {
-	    XCB_BACK_PIXMAP_NONE, XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY};
-	xcb_create_window(c, XCB_COPY_FROM_PARENT, w, screen->root, 0, 0, 400, 300, 0,
-	                  XCB_WINDOW_CLASS_INPUT_OUTPUT, screen->root_visual,
-	                  XCB_CW_BACK_PIXMAP | XCB_CW_EVENT_MASK, values);
+	const uint32_t mask = XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY;
+	xcb_visualid_t visual = XCB_NONE;
+	for (auto d = xcb_screen_allowed_depths_iterator(screen); argb && d.rem && !visual;
+	     xcb_depth_next(&d)) {
+		for (auto v = xcb_depth_visuals_iterator(d.data); d.data->depth == 32 && v.rem;
+		     xcb_visualtype_next(&v)) {
+			if (v.data->_class == XCB_VISUAL_CLASS_TRUE_COLOR) {
+				visual = v.data->visual_id;
+				break;
+			}
+		}
+	}
+	if (argb && visual == XCB_NONE) {
+		fputs("slowclient: no visual with alpha\n", stderr);
+		return 1;
+	}
+	if (argb) {
+		xcb_colormap_t colormap = xcb_generate_id(c);
+		xcb_create_colormap(c, XCB_COLORMAP_ALLOC_NONE, colormap, screen->root, visual);
+		const uint32_t values[] = {0, 0, mask, colormap};
+		xcb_create_window(c, 32, w, screen->root, 0, 0, 400, 300, 0,
+		                  XCB_WINDOW_CLASS_INPUT_OUTPUT, visual,
+		                  XCB_CW_BACK_PIXEL | XCB_CW_BORDER_PIXEL | XCB_CW_EVENT_MASK |
+		                      XCB_CW_COLORMAP,
+		                  values);
+	} else {
+		const uint32_t values[] = {XCB_BACK_PIXMAP_NONE, mask};
+		xcb_create_window(c, XCB_COPY_FROM_PARENT, w, screen->root, 0, 0, 400, 300, 0,
+		                  XCB_WINDOW_CLASS_INPUT_OUTPUT, screen->root_visual,
+		                  XCB_CW_BACK_PIXMAP | XCB_CW_EVENT_MASK, values);
+	}
+	const char *alpha_env = getenv("SLOWCLIENT_ALPHA");
+	const uint32_t alpha = argb && alpha_env != NULL ? (uint32_t)atoi(alpha_env) & 0xff : 0xff;
+	const char *klass = getenv("SLOWCLIENT_CLASS");
 	char class[256];
-	int n = snprintf(class, sizeof(class), "%s%cslowclient", argv[1], 0);
+	int n = snprintf(class, sizeof(class), "%s%c%s", argv[1], 0,
+	                 klass != NULL ? klass : "slowclient");
 	xcb_change_property(c, XCB_PROP_MODE_REPLACE, w, XCB_ATOM_WM_CLASS,
 	                    XCB_ATOM_STRING, 8, (uint32_t)n + 1, class);
 	xcb_change_property(c, XCB_PROP_MODE_REPLACE, w, XCB_ATOM_WM_NAME,
@@ -137,7 +173,14 @@ int main(int argc, char **argv) {
 		if (drawing && now_ms() >= due) {
 			drawing = false;
 			first = false;
-			const uint32_t colour = 0x206080 + ((uint32_t)frame_width & 0xff);
+			const uint32_t rgb = 0x206080 + ((uint32_t)frame_width & 0xff);
+			uint32_t colour = rgb;
+			if (argb) {
+				colour = alpha << 24;
+				for (int shift = 0; shift < 24; shift += 8) {
+					colour |= ((rgb >> shift & 0xff) * alpha / 0xff) << shift;
+				}
+			}
 			xcb_change_gc(c, gc, XCB_GC_FOREGROUND, &colour);
 			uint16_t strip = partial && frame_height > 8 ? 8 : 0;
 			xcb_rectangle_t all = {0, 0, frame_width,
@@ -153,7 +196,7 @@ int main(int argc, char **argv) {
 		if (dirty && !drawing && (!never || first)) {
 			dirty = false;
 			drawing = true;
-			due = now_ms() + (first ? 0 : delays[frames++ % 2]);
+			due = now_ms() + (first && !argb ? 0 : delays[frames++ % 2]);
 			frame_width = width;
 			frame_height = height;
 			frame_request = request;

@@ -86,8 +86,8 @@ what i3 does:
 The first rule has the causes, `open` and `close`, for all windows, as a window that turns
 floating is floating by the time it moves. The second has the same motion for `geometry`
 (resize, swap, move, layout, floating off), but not for floating windows, so a mouse drag
-isn't slowed. It needs a picom with `window-image-width`, `fill`, `window-edge-red`,
-`frame-on-crop`, `saved-image-own-size` and `keep-stacking`.
+isn't slowed. It needs a picom with `window-image-width`, `fill`, `window-median-red` (or
+`window-edge-red`), `frame-on-crop`, `saved-image-own-size` and `keep-stacking`.
 
 - Each window of a change has a rectangle that goes from where the window was to where it
   is. All of them move on one curve, at one time, and start and end without speed. An edge
@@ -99,8 +99,13 @@ isn't slowed. It needs a picom with `window-image-width`, `fill`, `window-edge-r
   is drawn on the rectangle's edges in every frame: never scaled across it, as long as the
   side along it, and a title moves along with the content.
 - The content inside the frame is never scaled or blended. It is drawn at its own size, cut where it is larger than the inside of the
-  frame, and the part that it doesn't cover is filled with the colour of the
-  picture's edge (the ring just inside i3's frame). picom keeps the picture a window had
+  frame, and the part that it doesn't cover is filled with the median colour of the
+  content, the colour of more than half of it, so a rectangle looks like its window's
+  background: a terminal's is dark, a white page's white, whatever their text. The fill
+  is as opaque as that background, at the window's opacity, so a translucent window
+  stays as translucent, and nothing jumps when the change ends. picom works that colour out on the GPU (or in the
+  X server, for its xrender backend) ahead of a change, so it is there when the change
+  starts; for a new picture while a change has none, picom waits for it. picom keeps the picture a window had
   when the change started, and takes up each newer one as the program draws it (until the
   program has drawn at its new size, the newest is the last). In each frame the one that
   covers more of the rectangle is drawn, switching in one frame: a window that grows
@@ -108,6 +113,14 @@ isn't slowed. It needs a picom with `window-image-width`, `fill`, `window-edge-r
   its larger old picture, cut by the rectangle, until it lands, and a window whose split
   turns from side by side to one above the other shows the old tall picture or the new
   wide one, whichever fills more, so the fill covers only what neither does.
+- Under all of the rectangle, before the window, picom draws a backdrop: what the picture
+  leaves transparent shows it, not what lies behind. Its colour is the median colour of
+  the window's content with its alpha, or while picom doesn't know that, of the last
+  window of the same program (the class in WM_CLASS), or for a program picom knows no colour of, dark
+  grey. A window whose background is transparent gets a transparent backdrop, and a
+  translucent one an equally translucent one. A translucent window is less so while it
+  moves: the backdrop fades in at the start of a change and out at its end, so nothing
+  jumps.
 - A window that opens grows out of the line it split from (see [Variables](#variables)),
   its picture standing at its place and showing as the rectangle uncovers it, while its
   neighbours make room on the same curve. A window that closes goes
@@ -135,15 +148,20 @@ Save `picom.conf` once after that, so picom reads the copy.
 | `var-path` | 0 | the way a rectangle goes in a change of i3's layout (a swap, a move, a split that turns): 0 straight; 1 curved around where its old and new places overlap, so two windows that trade places pass each other and shrink a little on the way, or bent to the left of its way where they don't (one going right goes up); an undo goes back the way it came. Windows that make room for one that opens or take the place of one that closes go straight |
 | `var-lift` | 0.08 | with `var-path` 1, how far off its way a window whose places don't overlap goes midway, as a share of its size across the way |
 | `var-interrupt` | 1 | a change that comes while one runs: 1 keeps each rectangle's speed and slows it to rest at its new place, 0 starts the curve again from where it is |
-| `var-fill` | 1 | how much of the gap is filled with the colour of the picture's edge: 1 all, 0 none, so what lies behind shows |
+| `var-fill` | 1 | how much of the gap is filled: 1 all, as opaque as the window, 0 none, so what lies behind shows |
+| `@include` of the fill's colour | `parts/tile-fill-median.conf` | the colour of the fill: `tile-fill-median.conf` the median colour of the window's content, its background, `tile-fill-mean.conf` the mean colour of its content, which text moves, `tile-fill-edge.conf` the colour of the edge of its picture (the ring just inside i3's frame); an include, so picom works out only the one chosen |
 | `var-anchor-x`, `var-anchor-y` | the still point | where a picture that doesn't fit sits in its rectangle: 0 at the left (top) edge, 1 at the right (bottom), 0.5 in the middle; by default the point of the window that stays still in the change (`var-still-x`, `var-still-y`), so no edge of the picture goes back while the program catches up |
 | `var-lone-fade` | 1 | a window that opens or closes without a split line fades in or out: 1 yes, 0 no |
 | `var-far-line` | 1 | a window that shares no split line with its neighbours: 1 goes into its far side as into a line, 0 goes as one with no line (`var-lone-fade`) |
+| `var-backdrop` | 1 | how much of the backdrop under the rectangle is drawn: 1 all, 0 none, so what a picture leaves transparent shows what lies behind |
+| `var-backdrop-fade` | 0.25 | the share of `var-length` over which the backdrop fades in as a change starts (a window that opens has it at once) and out as it ends |
+| `var-backdrop-red`, `var-backdrop-green`, `var-backdrop-blue`, `var-backdrop-alpha` | 0.1, 0.1, 0.1, 1 | the backdrop's colour and alpha for a program picom knows no colour of yet; with `tile-fill-edge.conf`, for every window |
 | `var-picture` | whichever covers more | which picture of a moving window is drawn: 1 the one it had when the change started, 0 its newest, as soon as the program has drawn it; by default (`var-picture-best`), in each frame, the one that covers more of the rectangle, each at its own size from its anchor |
 
 The rest of `styles/parts/` is the motion itself: `tile-rect.conf` for a window that moves,
-`tile-open.conf` and `tile-close.conf`, and what they share in `tile-shared.conf`. Nobody needs to
-copy them. Without `make install`, copy `styles/parts/` to
+`tile-open.conf` and `tile-close.conf`, with what they share in `tile-shared.conf`, and the
+three colours of the fill, `tile-fill-median.conf`, `tile-fill-mean.conf` and
+`tile-fill-edge.conf`. Nobody needs to copy them. Without `make install`, copy `styles/parts/` to
 `win-cause/parts/` next to `picom.conf`, as picom looks for included files from there, not
 next to the style.
 
@@ -320,8 +338,11 @@ line. Two windows swapped and swapped back while they overlap keep the one in fr
 front, and so does a floating window that turns tiled under another. Two windows that trade
 places above a bar have no side on a seam: a dock is no tile. With a length of 1 s, a change
 that comes at 0.3, 0.5 and 0.7 of the one before (floating on then off, two resizes, an open
-then a close, two opens) makes no rectangle or picture jump. `WC_ONLY=far,stacking,dock,interrupt`
-runs only those parts.
+then a close, two opens) makes no rectangle or picture jump. A window whose first picture is
+empty (`tests/slowclient` with `argb`) has the backdrop in the colour of the last window of
+its program, and for a new program in the style's; a window at half
+alpha has its backdrop at that alpha, and a translucent window's backdrop fades in and out
+as it moves. `WC_ONLY=far,stacking,dock,interrupt,backdrop` runs only those parts.
 
 `tests/scene.py` runs a list of changes on Xvfb, with i3, picom and real or test programs,
 and keeps the marks and the frame log:
@@ -339,6 +360,9 @@ layout records (`PICOM_DEBUG="frame_timing=<path>;frame_layout=1"`): that no rec
 picture jumps, every rectangle comes to rest without speed, no picture is scaled or blended,
 the windows of a change start in one frame and move on one clock, the edges they share stay
 shared, a window that opens or closes does so on its line, no part of a closing window's
-place shows what lies behind, and the gap is filled as the script asks. It uses ws-direction's `tests/check-frames.py` for the motion:
+place shows what lies behind, and the gap is filled as the script asks, and never left
+unfilled once the window's colour can be known (`unfilled`), and a script that doesn't set opacity draws the window at the opacity
+it has at rest, with no jump when the animation ends (`opacity`), and its backdrop fades in
+and out, so a translucent window doesn't jump either (`backdrop`). It uses ws-direction's `tests/check-frames.py` for the motion:
 
     WS_DIRECTION=/path/to/ws-direction tests/check-tile.py frames.csv --monitor 0,0,1920,1080

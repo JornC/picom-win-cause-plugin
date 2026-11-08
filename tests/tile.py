@@ -14,6 +14,10 @@ dock       Two windows side by side above a bar (an i3bar dock at the bottom) tr
            a dock is no tile, so no side of theirs lies on a seam.
 interrupt  With var-length 1 s, a change that comes at about 0.3, 0.5 and 0.7 of the one
            before: floating on then off, two resizes, an open then a close, two opens.
+backdrop   A window whose first picture is still empty (tests/slowclient argb, as wezterm
+           and Chrome open) has a backdrop under its rectangle, in the median colour of the
+           last window of its class; for a class picom has no median of, the style's colour. A window drawn at half alpha gets a backdrop at that alpha. A
+           translucent window that moves gets a backdrop that fades in and out.
 
 tests/check-tile.py passes on what picom drew in each part: no rectangle or picture jumps,
 no scaled pictures, and the part's own checks.
@@ -43,7 +47,7 @@ DISPLAY = os.environ.get("WC_DISPLAY", ":97")
 BACKEND = os.environ.get("WC_BACKEND", "xrender")
 WIDTH, HEIGHT = 1280, 720
 LENGTH = 0.5
-PARTS = ("far", "stacking", "dock", "interrupt")
+PARTS = ("far", "stacking", "dock", "interrupt", "backdrop")
 ONLY = [p for p in os.environ.get("WC_ONLY", "").split(",") if p] or PARTS
 
 work = tempfile.mkdtemp(prefix="win-cause-tile-", dir=os.environ.get("XDG_RUNTIME_DIR"))
@@ -492,6 +496,93 @@ def interrupt():
 	check_tile(current["frames"], required=("rect", "picture", "scale", "blend"))
 
 
+def backdrop():
+	picom = start_picom("backdrop", length=LENGTH)
+
+	def slow(name, delay, klass, alpha=255):
+		process = subprocess.Popen(
+			[f"{ROOT}/build/slowclient", name, str(delay), "argb"],
+			env=dict(env, SLOWCLIENT_CLASS=klass, SLOWCLIENT_ALPHA=str(alpha)),
+			stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+		processes.append(process)
+		wait_for(lambda: name in names(), f"window {name}")
+		return process
+
+	i3("workspace 19")
+	x = open_window("x")
+	processes.append(x)
+	settle(LENGTH + 0.4)
+	# One with a picture at once: picom works out its median, the median of its class.
+	a = slow("bd-a", 0, "bd-same")
+	settle(LENGTH + 0.6)
+	close(a)
+	settle(LENGTH + 0.4)
+	with open(current["log"], errors="replace") as f:
+		medians = re.findall(r"The median colour of window \S+ \(bd-a\) is (\S+), (\S+), "
+		                     r"(\S+), alpha (\S+)", f.read())
+	known = [[float(v) for v in m[:3]] for m in medians if float(m[3]) > 0]
+	median = known[-1] if known else None
+	# One of the same class, its first picture empty for 0.4 s.
+	started()
+	offset = frame_log_size()
+	b = slow("bd-b", 400, "bd-same")
+	settle(0.45 + LENGTH + 0.4)
+	started()
+	under = records_of(offset, "U", frame_ids.get("bd-b"))
+	check(under and median is not None and float(under[0][3]) > 0.99 and
+	      all(abs(float(v) - m) <= 1e-4 for v, m in zip(under[0][4:7], median)),
+	      f"an empty first picture: backdrop {under[:1]}, wanted the median of its class "
+	      f"{median}")
+	close(b)
+	settle(LENGTH + 0.4)
+	# One of a class picom has no median of: the style's colour.
+	offset = frame_log_size()
+	c = slow("bd-c", 400, "bd-other")
+	settle(LENGTH + 0.4)
+	started()
+	under = records_of(offset, "U", frame_ids.get("bd-c"))
+	script = records_of(offset, "E", frame_ids.get("bd-c"))
+	own = dict(kv.split("=", 1) for kv in script[0][5:]) if script else {}
+	own = [float(own.get(f"var-backdrop-{k}", -1)) for k in ("red", "green", "blue")]
+	check(under and float(under[0][3]) > 0.99 and
+	      all(abs(float(v) - m) <= 1e-4 for v, m in zip(under[0][4:7], own)),
+	      f"a class with no median: backdrop {under[:1]}, wanted the style's {own}")
+	close(c)
+	settle(LENGTH + 0.4)
+	# One drawn at half alpha: its backdrop has the alpha of its median, as its fill has.
+	offset = frame_log_size()
+	h = slow("bd-h", 0, "bd-half", 128)
+	settle(LENGTH + 0.4)
+	started()
+	levels = {p[1]: float(p[3]) for p in records_of(offset, "U", frame_ids.get("bd-h"))}
+	known = []
+	for p in records_of(offset, "E", frame_ids.get("bd-h")):
+		v = dict(kv.split("=", 1) for kv in p[5:])
+		if float(v.get("var-fill-alpha", 0)) > 0 and float(v.get("var-bd", 0)) > 0:
+			known.append((float(v["var-fill-alpha"]), float(v["var-bd"]), levels.get(p[1], 0)))
+	check(known and all(abs(alpha - 128 / 255) <= 0.02 and abs(level - bd * alpha) <= 0.01
+	                    for alpha, bd, level in known),
+	      f"a window at half alpha: its backdrop is not at that alpha (alpha, var-bd, "
+	      f"backdrop): {known[:5]}")
+	close(h)
+	settle(LENGTH + 0.4)
+	# A translucent one: its backdrop fades in and out as it moves.
+	g = open_window("glass")
+	processes.append(g)
+	settle(LENGTH + 0.4)
+	offset = frame_log_size()
+	i3("[title=^glass$] move left")
+	settle(LENGTH + 0.4)
+	started()
+	under = records_of(offset, "U", frame_ids.get("glass"))
+	check(any(float(p[3]) > 0.99 for p in under),
+	      f"a translucent window that moves has no backdrop: {under[:3]}")
+	frames_from(offset, f"{work}/frames-glass.csv")
+	check_tile(f"{work}/frames-glass.csv", required=("backdrop", "opacity"))
+	close_apart(g, x)
+	stop(picom)
+
+
 with open(f"{work}/i3.conf", "w") as f:
 	f.write(f"ipc-socket {socket}\nfont pango:monospace 9\nfocus_follows_mouse no\n")
 
@@ -505,7 +596,7 @@ try:
 	processes.append(spawn("i3", "-c", f"{work}/i3.conf"))
 	wait_for(lambda: os.path.exists(socket), "i3")
 	for part, run in (("far", far_side), ("stacking", stacking), ("dock", dock_swap),
-	                  ("interrupt", interrupt)):
+	                  ("interrupt", interrupt), ("backdrop", backdrop)):
 		if part in ONLY:
 			run()
 except AssertionError as error:
