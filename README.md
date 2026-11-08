@@ -41,9 +41,7 @@ such as those of ws-direction:
         preset = "geometry-change";
         duration = 0.25;
       }, {
-        triggers = ["swirl"];
-        preset = "geometry-change";
-        duration = 0.4;
+        @include "win-cause/swirl.conf"
       });
     }, {
       match = "!I3_FLOATING_WINDOW@";
@@ -58,7 +56,7 @@ The window that becomes floating is floating by the time it moves, so `moved-by-
 be in a rule that matches floating windows, like the first one here. The second leaves them
 out, so a mouse drag of a floating window isn't slowed down. A preset can't set
 `keep-stacking`, so with `geometry-change` a window i3 restacks while two pass each other
-can jump in front of the other; the tile style sets it.
+can jump in front of the other; the tile style and `swirl.conf` set it.
 
 For what i3 doesn't show, a command says why. Any name works, as long as picom.conf declares
 it in `animation-triggers`:
@@ -67,6 +65,10 @@ it in `animation-triggers`:
     bindsym $mod+s exec --no-startup-id win-cause run swirl -- i3-msg swap container with mark swap
     bindsym $mod+e exec --no-startup-id win-cause run reflow -- i3-msg layout toggle split
     bindsym $mod+Shift+f exec --no-startup-id win-cause run unfloat -- i3-msg floating disable
+
+`swirl.conf` needs a picom with the corner outputs (`corner-top-left-x` and the others) and
+`keep-stacking`: i3 restacks the two windows at each swap, and the one in front stays in front
+while they overlap.
 
 Every window the command moves starts that trigger, and `win-cause run swirl <window>... -- ...`
 limits it to those client windows. Nothing stays set afterwards, however long the command
