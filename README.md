@@ -213,18 +213,29 @@ can change and how to use it. Most go in the rule of `tile.conf`, in its place, 
 `-geometry.conf` file in the rule of `tile-geometry.conf`; fold, pop and twirl have no
 such file, and `tile-geometry.conf` stays.
 
+- **cards**: windows are cards on a table. A card that moves lifts, slides and drops; two
+  that trade places turn over; one that opens is dealt in, one that closes is turned face
+  down. Needs the corner outputs, `back-face` and `dim`.
 - **cube**: windows are the faces of boxes that turn, as ws-direction's cube. Needs the
   corner outputs.
 - **domino**: tile, with each window of a change starting later the further right it
   starts on its monitor, so a change ripples from left to right.
 - **fold**: a window that closes folds away in 3D into its split line, and one that opens
   unfolds out of it. Needs the corner outputs.
+- **ink**: while a window moves it is colour, not content: its picture drains into a
+  block of its median colour, which moves, and comes back out at the new place. Goes with
+  ws-direction's ink.
 - **origami**: windows are hinged panels that turn and fold as they move, open and close.
   Needs the corner outputs.
+- **paper**: windows are sheets of paper on a desk that tilt as they move, drop in
+  swinging on their top edge, and fall away. Goes with ws-direction's paper. Needs the
+  corner outputs and `crop-in-plane`.
 - **pop**: a window that opens grows out of its middle and fades in, one that closes
   shrinks into it and fades out. Goes with ws-direction's pop.
 - **spring**: tile on a damped spring: each rectangle goes a little past its place and
   settles back.
+- **step-back**: in a change the view pulls back, the windows move, and it comes forward
+  again.
 - **twirl**: pop with a turn in the plane of the screen. Goes with ws-direction's twirl.
   Needs the corner outputs.
 - **warp**: a window that moves sinks into the middle of its old place and bursts out of
@@ -433,7 +444,8 @@ the overview shows, and a workspace switch and an overview that come during a ch
 closes, next to two others: in every frame of its animations the two are drawn as they are
 at rest, at full opacity, where they are, and behind it where they overlap.
 `tests/drawn.py` checks the styles that trade a window's old picture for its newest at a
-moment where it is hidden (origami, cube, warp and flip): two `tests/slowclient` windows get a new size, one draws
+moment where it is hidden (origami, cube, ink, warp, step-back and flip; cards' moves have no
+such moment and keep tile's rule): two `tests/slowclient` windows get a new size, one draws
 it before that moment and one after. The newest picture comes at that moment for the first
 and as soon as it drew for the second, and reads of the screen show, inside each picture, the
 colour its program drew at the picture's size, never what lies behind nor another size's.

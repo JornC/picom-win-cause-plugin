@@ -14,8 +14,9 @@ they drew:
 
   hidden  where picom saved the old picture, each frame of the animation draws it before
           the style's hidden moment and the window's image from then on: origami and cube
-          at edge on (var-e 0.5), warp at its smallest (var-q 0.5), flip at edge on
-          (var-ease 0.5). Tile has no such moment
+          at edge on (var-e 0.5), ink while it is a colour block and warp at its smallest
+          (var-q 0.5), step-back mid-way (var-q 0.5), flip at edge on (var-ease 0.5). Tile
+          and the moves of cards have no such moment
   waits   the first frame that draws the window's image at its new size starts after the
           program drew that size. For a, c and d, that is the first frame past the hidden
           moment; for b, at most three frames after the first one that starts after its
@@ -33,6 +34,10 @@ they drew:
           another size's colour nor any other. A read with more than 10 % of its points
           wrong fails: an empty picture is wrong all over, while xrender, where it scales a
           picture, can draw one column of it black, which is not what this checks
+  sheet   paper: the sheet a window is drawn as (its crop box, which lies in the window's
+          plane, or without one the window's own corners) is as wide and as high as its
+          box (var-gw, var-gh) within 10 %, seen from where its middle is, in every
+          frame: its shape follows the box, and only the picture in it changes
   turn    cube: the line a window turns about (var-qcx + var-pu across, var-qcy + var-pv
           down) doesn't jump against the way the window goes (var-dcx, var-dcy) at the
           half of its turn, by more than 2 px: a box that tips over an edge comes down on
@@ -83,13 +88,21 @@ SIZE = (1280, 720)
 STYLES = {
     "origami": ("@include \"win-cause/origami-geometry.conf\"", "var-e", 1.5),
     "cube": ("@include \"win-cause/cube-geometry.conf\"", "var-e", 1.5),
+    "ink": ("@include \"win-cause/ink-geometry.conf\"", "var-q", 1.5),
     "warp": ("@include \"win-cause/warp-geometry.conf\"", "var-q", 1.0),
+    "step-back": ("@include \"win-cause/step-back-geometry.conf\"", "var-q", 1.6),
     "flip": ("animations = ({\n    @include \"win-cause/flip.conf\"\n  });", "var-ease", 1.0),
+    "cards": ("@include \"win-cause/cards-geometry.conf\"", None, 1.4),
     "tile": ("@include \"win-cause/tile-geometry.conf\"", None, 1.0),
+    "paper": ("@include \"win-cause/paper-geometry.conf\"", None, 1.0),
 }
+# The styles that draw a window's newest picture as soon as the program drew it.
+NEWEST = {"paper"}
 # The styles that draw whichever picture covers more: the newest of a window that grows as
 # soon as the program drew it, and that of one that shrinks where its move ends.
 BEST = {"tile"}
+# The styles that draw a window as a sheet that follows its box (see sheet).
+SHEETS = {"paper"}
 # The styles whose windows turn about a line (see turn).
 TURNS = {"cube"}
 
@@ -326,13 +339,15 @@ def check(out, style):
             if first != end:
                 failures.append(f"{name}: shrinks, but its new picture shows from frame "
                                 f"{first}, not {end}, where its move ends")
-        elif hidden_at is not None or style in BEST:
+        elif hidden_at is not None or style in NEWEST or style in BEST:
             after = next(k for k, n in enumerate(frames) if R[n][0] >= t_draw)
             if frames.index(first) - after > 3:
                 failures.append(f"{name}: its new picture shows "
                                 f"{frames.index(first) - after} frames after it drew it")
     if style in TURNS:
         failures += check_turn(log, names, change)
+    if style in SHEETS:
+        failures += check_sheet(log, names, change)
     failures += check_reads(out, log, names, style)
     return failures
 
@@ -348,6 +363,50 @@ def ended(E, anim, window):
     """The frame of `anim` in which the animation of `window` ends: the last, or the first
     whose time has run out."""
     return next((n for n in anim if E[n][window]["ended"]), anim[-1])
+
+
+def square_to_quad(quad):
+    """The projective map from the unit square onto `quad` (top left, top right, bottom
+    left, bottom right), as a function of (s, t)."""
+    (x0, y0), (x1, y1), (x2, y2), (x3, y3) = quad
+    sx, sy = x0 - x1 + x3 - x2, y0 - y1 + y3 - y2
+    dx1, dx2, dy1, dy2 = x1 - x3, x2 - x3, y1 - y3, y2 - y3
+    den = dx1 * dy2 - dx2 * dy1
+    g = (sx * dy2 - dx2 * sy) / den if den else 0
+    h = (dx1 * sy - sx * dy1) / den if den else 0
+    a, b, c = x1 - x0 + g * x1, x2 - x0 + h * x2, x0
+    d, e, f = y1 - y0 + g * y1, y2 - y0 + h * y2, y0
+    return lambda s, t: ((a * s + b * t + c) / (g * s + h * t + 1),
+                         (d * s + e * t + f) / (g * s + h * t + 1))
+
+
+def check_sheet(log, names, change):
+    R, W, E = log["R"], log["W"], log["E"]
+    failures = []
+    for window, name in sorted(names.items(), key=lambda kv: kv[1]):
+        worst = None
+        for n in sorted(R):
+            v = E[n].get(window)
+            w = W[n].get(window)
+            if R[n][0] < change or v is None or w is None or "var-gw" not in v or w[3] != "D":
+                continue
+            corners = [(float(w[8 + 2 * i]), float(w[9 + 2 * i])) for i in range(4)]
+            crop = [float(c) for c in w[17:21]]
+            if abs(crop[2]) < 100000:
+                px, py, pw, ph = (float(v[k]) for k in ("var-px", "var-py", "var-pw", "var-ph"))
+                to = square_to_quad(corners)
+                corners = [to((crop[0] + (i % 2) * crop[2] - px) / pw,
+                              (crop[1] + (i // 2) * crop[3] - py) / ph) for i in range(4)]
+            (x0, y0), (x1, y1), (x2, y2), _ = corners
+            wide = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5 / float(v["var-gw"])
+            high = ((x2 - x0) ** 2 + (y2 - y0) ** 2) ** 0.5 / float(v["var-gh"])
+            off = max(abs(wide - 1), abs(high - 1))
+            if worst is None or off > worst[0]:
+                worst = (off, n, wide, high)
+        if worst is not None and worst[0] > 0.1:
+            failures.append(f"{name}: in frame {worst[1]} its sheet is {worst[2]:.2f} of its "
+                            f"box's width and {worst[3]:.2f} of its height")
+    return failures
 
 
 def check_turn(log, names, change):
